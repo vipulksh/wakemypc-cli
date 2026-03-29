@@ -1,0 +1,511 @@
+"""
+main.py -- Click-based CLI for managing Raspberry Pi Pico W 2 devices
+======================================================================
+
+WHAT THIS TOOL DOES
+--------------------
+This is a command-line tool that runs on YOUR COMPUTER (not on the Pico).
+It helps you set up and manage Raspberry Pi Pico W 2 transmitter devices
+by communicating with them over USB.
+
+Think of it like a setup wizard: you plug in a Pico, run these commands,
+and the Pico is configured and ready to transmit data.
+
+THE SETUP WORKFLOW
+------------------
+Here is the typical order of operations for a brand new Pico:
+
+  1. pico-cli flash --uf2 firmware.uf2
+     Install MicroPython on the Pico. You only do this once (or when updating).
+     The Pico must be in BOOTSEL mode (hold button while plugging in).
+
+  2. pico-cli detect
+     Verify the Pico is detected on a serial port after flashing.
+
+  3. pico-cli upload --firmware-dir ./pico_firmware/
+     Upload your application Python files to the Pico's filesystem.
+
+  4. pico-cli provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret
+     Write WiFi credentials and server URL to the Pico's secrets.json.
+
+  5. pico-cli register --api-url https://example.com --username admin --password pass
+     Register the Pico on the server and get a device_token written to it.
+
+  6. pico-cli identify
+     Blink the LED to verify which physical Pico you just configured.
+
+After these steps, unplug the Pico and plug it into a power source.
+It will boot, connect to WiFi, and start sending data to your server.
+
+HOW USB SERIAL DETECTION WORKS
+-------------------------------
+When you plug a Pico into your computer via USB, the operating system creates
+a "serial port" for it. On Linux this is typically /dev/ttyACM0, on macOS it is
+/dev/cu.usbmodem..., and on Windows it is COM3 or higher.
+
+We detect Picos by looking at the USB Vendor ID (VID) and Product ID (PID).
+Raspberry Pi's VID is 0x2E8A. If a serial port has this VID, it is a Pico.
+
+WHAT IS BOOTSEL MODE?
+---------------------
+BOOTSEL = "Boot Select". It is a special mode where the Pico appears as a USB
+flash drive instead of a serial device. You enter it by holding the BOOTSEL
+button (small white button on the board) while plugging in the USB cable.
+
+In BOOTSEL mode, you can copy a .uf2 firmware file to the drive, and the Pico
+will install it and reboot. This is how you install or update MicroPython.
+
+HOW mpremote COPIES FILES
+--------------------------
+mpremote is the official MicroPython tool for managing devices over serial.
+When you run 'pico-cli upload', we use mpremote to copy Python files from your
+computer to the Pico's tiny internal filesystem. mpremote connects to the serial
+port, enters a special "raw REPL" mode, and transfers file data efficiently.
+
+If mpremote is not installed, we fall back to sending Python commands directly
+over the serial connection to write files (slower but works without extra tools).
+
+HOW REGISTRATION WORKS
+-----------------------
+Registration is how the server learns about a new Pico:
+
+  1. You provide your server login credentials (username + password).
+  2. This tool logs into the server and gets a JWT (temporary access token).
+  3. The tool reads the Pico's unique hardware ID via USB.
+  4. It sends the hardware ID to the server's API to register the device.
+  5. The server creates a device record and returns a device_token.
+  6. The tool writes the device_token to the Pico's secrets.json file.
+
+Now the Pico can authenticate with the server using its device_token.
+
+ABOUT CLICK
+-----------
+Click is a Python library for building command-line interfaces. It turns
+Python functions into CLI commands using decorators (@click.command, etc.).
+Each function becomes a subcommand like 'pico-cli detect' or 'pico-cli flash'.
+"""
+
+import sys
+from pathlib import Path
+
+import click
+
+
+@click.group()
+@click.version_option(version="1.0.0", prog_name="pico-cli")
+def cli():
+    """
+    CLI tool to flash, provision, and register Raspberry Pi Pico W 2 transmitters.
+
+    This tool runs on your computer and communicates with Pico devices over USB.
+    Use --help on any subcommand for details (e.g. pico-cli flash --help).
+    """
+    pass
+
+
+# ---------------------------------------------------------------------------
+# DETECT -- List connected Pico devices
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+def detect():
+    """
+    List all Raspberry Pi Pico devices connected via USB serial.
+
+    This scans your computer's USB ports for devices with Raspberry Pi's Vendor ID
+    (0x2E8A). It only finds Picos that have MicroPython installed and are in normal
+    mode (not BOOTSEL mode).
+
+    If no Picos are found, make sure:
+      - The Pico is plugged in via USB
+      - MicroPython is installed (use 'pico-cli flash' if not)
+      - The Pico is NOT in BOOTSEL mode (it should not appear as a USB drive)
+      - On Linux: you may need permission (sudo usermod -a -G dialout $USER)
+    """
+    from .serial_detect import list_pico_serial_ports
+
+    click.echo("Scanning for Raspberry Pi Pico devices...")
+    picos = list_pico_serial_ports()
+
+    if not picos:
+        click.echo("\nNo Pico devices found.")
+        click.echo("\nTroubleshooting:")
+        click.echo("  - Is the Pico plugged in via USB?")
+        click.echo(
+            "  - Does it have MicroPython installed? (use 'pico-cli flash' first)"
+        )
+        click.echo(
+            "  - Is it in BOOTSEL mode? (BOOTSEL shows as a drive, not a serial port)"
+        )
+        click.echo(
+            "  - On Linux, try: sudo usermod -a -G dialout $USER  (then re-login)"
+        )
+        sys.exit(1)
+
+    click.echo(f"\nFound {len(picos)} Pico device(s):\n")
+    for p in picos:
+        click.echo(f"  Port:        {p['port']}")
+        click.echo(f"  Description: {p['description']}")
+        click.echo(f"  VID:PID:     {p['vid']:#06x}:{p['pid']:#06x}")
+        click.echo(f"  Serial:      {p['serial']}")
+        click.echo()
+
+
+# ---------------------------------------------------------------------------
+# FLASH -- Flash MicroPython firmware to a Pico in BOOTSEL mode
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--uf2",
+    type=click.Path(exists=True),
+    help="Path to the .uf2 MicroPython firmware file. Download from https://micropython.org/download/",
+)
+def flash(uf2):
+    """
+    Flash MicroPython firmware to a Pico in BOOTSEL mode.
+
+    The Pico must be in BOOTSEL mode for this to work. To enter BOOTSEL:
+      1. Unplug the Pico from USB.
+      2. Hold the BOOTSEL button (small white button on the board).
+      3. Plug the USB cable back in while holding the button.
+      4. Release the button.
+
+    The Pico should appear as a USB drive named 'RPI-RP2' or 'RP2350'.
+    This command copies the .uf2 file to that drive, which installs the firmware.
+    """
+    from .flash import find_bootsel_drive, flash_uf2, wait_for_serial_after_flash
+
+    if uf2 is None:
+        # If no .uf2 file specified, just check if BOOTSEL drive is present
+        drive = find_bootsel_drive()
+        if drive:
+            click.echo(f"Pico in BOOTSEL mode detected at: {drive}")
+            click.echo("\nTo flash MicroPython, run:")
+            click.echo("  pico-cli flash --uf2 <path-to-firmware.uf2>")
+            click.echo("\nDownload firmware from: https://micropython.org/download/")
+            click.echo("  For Pico W 2, look for 'RPI_PICO2_W'")
+        else:
+            click.echo("No Pico in BOOTSEL mode detected.")
+            click.echo("\nTo enter BOOTSEL mode:")
+            click.echo("  1. Unplug the Pico")
+            click.echo("  2. Hold the BOOTSEL button")
+            click.echo("  3. Plug USB back in while holding the button")
+            click.echo("  4. Release the button")
+            sys.exit(1)
+        return
+
+    click.echo(f"Flashing firmware: {uf2}")
+    try:
+        result = flash_uf2(uf2)
+        click.echo(f"Firmware copied to {result['drive_path']}")
+        click.echo("\nBoard info:")
+        for line in result["board_info"].strip().split("\n"):
+            click.echo(f"  {line}")
+        click.echo("\nThe Pico is rebooting with new firmware...")
+        click.echo("Waiting for serial port to appear...")
+
+        port = wait_for_serial_after_flash(timeout=15)
+        if port:
+            click.echo(f"\nSuccess! Pico is now running MicroPython on {port}")
+            click.echo("Next step: upload your firmware files with 'pico-cli upload'")
+        else:
+            click.echo("\nPico did not appear as a serial device within 15 seconds.")
+            click.echo(
+                "It may still be booting. Try 'pico-cli detect' in a few seconds."
+            )
+    except Exception as e:
+        click.echo(f"\nError: {e}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# UPLOAD -- Upload .py files to the Pico's filesystem
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--port",
+    default=None,
+    help="Serial port of the Pico (e.g. /dev/ttyACM0). Auto-detected if not specified.",
+)
+@click.option(
+    "--firmware-dir",
+    type=click.Path(exists=True),
+    default=None,
+    help="Directory containing .py files to upload to the Pico.",
+)
+@click.argument("files", nargs=-1, type=click.Path(exists=True))
+def upload(port, firmware_dir, files):
+    """
+    Upload Python files to the Pico's filesystem.
+
+    You can specify individual files or a directory containing .py files:
+
+      pico-cli upload main.py config.py
+
+      pico-cli upload --firmware-dir ./pico_firmware/
+
+    The files are uploaded to the root of the Pico's filesystem. The Pico
+    runs main.py automatically on boot, so make sure that file exists.
+
+    Uses mpremote if installed (recommended: pip install mpremote), otherwise
+    falls back to slower serial REPL transfer.
+    """
+    from .serial_detect import get_single_pico_port
+    from .upload import upload_files, is_mpremote_available
+
+    # Resolve the port
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Collect files to upload
+    file_list = list(files)
+    if firmware_dir:
+        firmware_path = Path(firmware_dir)
+        py_files = sorted(firmware_path.glob("*.py"))
+        if not py_files:
+            click.echo(f"No .py files found in {firmware_dir}", err=True)
+            sys.exit(1)
+        file_list.extend(str(f) for f in py_files)
+
+    if not file_list:
+        click.echo(
+            "No files specified. Use --firmware-dir or pass file paths.", err=True
+        )
+        click.echo("Example: pico-cli upload --firmware-dir ./pico_firmware/")
+        sys.exit(1)
+
+    # Show transfer method
+    if is_mpremote_available():
+        click.echo("Using mpremote for file transfer (fast, reliable)")
+    else:
+        click.echo("mpremote not found, using serial REPL fallback (slower)")
+        click.echo("Tip: install mpremote for faster transfers: pip install mpremote")
+
+    click.echo(f"\nUploading {len(file_list)} file(s) to Pico on {port}...\n")
+
+    results = upload_files(port, file_list)
+
+    success_count = sum(1 for r in results if r["success"])
+    fail_count = len(results) - success_count
+
+    for r in results:
+        if r["success"]:
+            click.echo(f"  OK   {r['file']} -> {r.get('remote', '?')}")
+        else:
+            click.echo(f"  FAIL {r['file']}: {r['error']}")
+
+    click.echo(f"\nUploaded: {success_count}  Failed: {fail_count}")
+
+    if fail_count > 0:
+        sys.exit(1)
+    else:
+        click.echo(
+            "\nNext step: provision with 'pico-cli provision' or register with 'pico-cli register'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PROVISION -- Write secrets.json config to the Pico
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--server-url",
+    required=True,
+    help="URL of your Django server (e.g. https://example.com)",
+)
+@click.option("--wifi-ssid", default=None, help="WiFi network name (SSID)")
+@click.option("--wifi-pass", default=None, help="WiFi password")
+@click.option(
+    "--port", default=None, help="Serial port (auto-detected if not specified)"
+)
+def provision(server_url, wifi_ssid, wifi_pass, port):
+    """
+    Write WiFi and server configuration to the Pico's secrets.json.
+
+    This writes a secrets.json file to the Pico containing the WiFi credentials
+    and server URL. The Pico reads this file on boot to know how to connect.
+
+    If the Pico already has a secrets.json, existing values are preserved
+    unless you explicitly override them with flags.
+
+    Examples:
+
+      First-time setup (all fields required):
+        pico-cli provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret123
+
+      Update just the server URL (keep existing WiFi):
+        pico-cli provision --server-url https://new-server.com
+    """
+    from .serial_detect import get_single_pico_port
+    from .provision import provision_pico
+
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Provisioning Pico on {port}...")
+
+    try:
+        result = provision_pico(
+            port=port,
+            server_url=server_url,
+            wifi_ssid=wifi_ssid,
+            wifi_password=wifi_pass,
+        )
+        click.echo(f"\nDevice ID: {result['device_id']}")
+        click.echo(f"Port:      {result['port']}")
+        click.echo("\nConfiguration written to secrets.json:")
+        for key, value in result["secrets_written"].items():
+            click.echo(f"  {key}: {value}")
+        click.echo("\nProvisioning complete!")
+        click.echo("Next step: register with 'pico-cli register' to get a device_token")
+    except RuntimeError as e:
+        click.echo(f"\nError: {e}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# REGISTER -- Register the Pico on the Django server
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--api-url",
+    required=True,
+    help="Base URL of your Django server (e.g. https://example.com)",
+)
+@click.option("--username", required=True, help="Your Django server username")
+@click.option(
+    "--password",
+    required=True,
+    prompt=True,
+    hide_input=True,
+    help="Your Django server password",
+)
+@click.option(
+    "--port", default=None, help="Serial port (auto-detected if not specified)"
+)
+@click.option(
+    "--name",
+    default=None,
+    help="Human-friendly name for this Pico (e.g. 'Kitchen Sensor')",
+)
+def register(api_url, username, password, port, name):
+    """
+    Register this Pico on the Django server and get a device_token.
+
+    This command:
+      1. Logs into the server with your credentials.
+      2. Reads the Pico's unique hardware ID.
+      3. Registers the device on the server.
+      4. Writes the device_token back to the Pico's secrets.json.
+
+    After registration, the Pico can authenticate with the server
+    to send sensor data.
+
+    IMPORTANT: The device_token is shown only once! Save it somewhere safe.
+    If you lose it, you will need to regenerate it via the server's web interface.
+    """
+    from .serial_detect import get_single_pico_port
+    from .register import register_and_provision
+
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Registering Pico on {port} with server {api_url}...")
+
+    try:
+        result = register_and_provision(
+            api_url=api_url,
+            username=username,
+            password=password,
+            port=port,
+            device_name=name,
+        )
+        click.echo(f"\n{'=' * 60}")
+        click.echo("Device registered successfully!")
+        click.echo(f"{'=' * 60}")
+        click.echo(f"\n  Device ID:    {result['device_id']}")
+        click.echo(f"  Device Token: {result['device_token']}")
+        click.echo(f"  Port:         {result['port']}")
+        click.echo(f"\n{'=' * 60}")
+        click.echo("SAVE THE DEVICE TOKEN ABOVE -- it is shown only once!")
+        click.echo(f"{'=' * 60}")
+        click.echo("\nThe token has also been written to the Pico's secrets.json.")
+        click.echo(
+            "The Pico is now ready. Plug it into a power source to start transmitting."
+        )
+    except RuntimeError as e:
+        click.echo(f"\nError: {e}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# IDENTIFY -- Blink LED for physical identification
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--port", default=None, help="Serial port (auto-detected if not specified)"
+)
+@click.option(
+    "--duration", default=4, type=int, help="How long to blink in seconds (default: 4)"
+)
+def identify(port, duration):
+    """
+    Blink the Pico's onboard LED rapidly for physical identification.
+
+    When you have multiple Picos and need to know which physical device
+    corresponds to which serial port, use this command. The LED will blink
+    rapidly so you can spot which Pico it is.
+
+    You can then label the physical device with its port name or device ID.
+
+    Example:
+      pico-cli identify                       # auto-detect single Pico
+      pico-cli identify --port /dev/ttyACM0   # identify a specific Pico
+      pico-cli identify --duration 10         # blink for 10 seconds
+    """
+    from .serial_detect import get_single_pico_port
+    from .identify import read_device_id_and_blink
+
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Identifying Pico on {port}...")
+    click.echo(f"Watch for the blinking LED! (blinking for ~{duration} seconds)")
+
+    try:
+        result = read_device_id_and_blink(port)
+        click.echo(f"\n{result['message']}")
+        click.echo(f"\nYou can label this device as: {result['device_id']}")
+    except RuntimeError as e:
+        click.echo(f"\nError: {e}", err=True)
+        sys.exit(1)
+
+
+# Entry point: this is what runs when you type 'pico-cli' on the command line.
+# The pyproject.toml maps 'pico-cli' -> 'pico_cli.main:cli', so this function
+# is called directly.
+if __name__ == "__main__":
+    cli()

@@ -1,0 +1,17 @@
+[project]
+name = "pico-cli"
+version = "1.0.0"
+description = "CLI tool to flash, provision, and register Raspberry Pi Pico W 2 transmitters"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "pyserial>=3.5",
+    "requests>=2.28",
+]
+
+[project.scripts]
+pico-cli = "pico_cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
