@@ -504,6 +504,174 @@ def identify(port, duration):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# STATUS -- Show current Pico status (config, WiFi, server connection)
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--port", default=None, help="Serial port (auto-detected if not specified)"
+)
+def status(port):
+    """
+    Show current Pico status: config, WiFi connection, and server info.
+
+    This connects to the Pico over USB serial and reads:
+      - The device's unique hardware ID
+      - WiFi connection status and IP address
+      - Server URL and device token (masked) from secrets.json
+      - Free memory and firmware info
+
+    Useful for debugging connection issues. If WiFi shows "not connected",
+    check your WiFi credentials with 'pico-cli provision'. If the server
+    URL is wrong, update it with 'pico-cli provision --server-url ...'.
+
+    HOW THIS WORKS UNDER THE HOOD
+    ------------------------------
+    This command opens the Pico's USB serial port and sends raw Python
+    commands to the MicroPython REPL (Read-Eval-Print Loop). MicroPython
+    executes the commands and prints the output, which we capture and
+    parse. This is the same mechanism that Thonny IDE uses to interact
+    with MicroPython devices.
+    """
+    import json
+    import time
+    import serial
+
+    from .serial_detect import get_single_pico_port
+
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Reading status from Pico on {port}...\n")
+
+    try:
+        # Open serial connection to the Pico's MicroPython REPL.
+        # 115200 baud is the default for MicroPython on Pico.
+        # timeout=2 means read() will wait up to 2 seconds for data.
+        ser = serial.Serial(port, 115200, timeout=2)
+        time.sleep(0.5)  # Wait for REPL to be ready after connection
+
+        def run_command(cmd):
+            """
+            Send a Python command to the MicroPython REPL and capture output.
+
+            We send Ctrl+C first to interrupt any running program, then
+            send the command followed by Enter. The REPL executes it and
+            prints the result, which we read back from the serial port.
+            """
+            # Interrupt any running program (Ctrl+C)
+            ser.write(b"\x03")
+            time.sleep(0.1)
+            ser.read(ser.in_waiting or 1)  # Clear buffer
+
+            # Send the command
+            ser.write(cmd.encode() + b"\r\n")
+            time.sleep(0.5)
+
+            # Read response
+            response = ser.read(ser.in_waiting or 1024).decode(errors="replace")
+            return response
+
+        # --- Read device ID ---
+        click.echo("Device Info:")
+        click.echo("-" * 40)
+        response = run_command("import machine; print(machine.unique_id().hex())")
+        # Parse the device ID from the REPL output
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith(">>>") and "import" not in line:
+                click.echo(f"  Unique ID:    {line}")
+                break
+
+        # --- Read free memory ---
+        response = run_command("import gc; gc.collect(); print(gc.mem_free())")
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.isdigit():
+                click.echo(f"  Free RAM:     {int(line):,} bytes")
+                break
+
+        # --- Read CPU frequency ---
+        response = run_command("import machine; print(machine.freq())")
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.isdigit():
+                click.echo(f"  CPU Freq:     {int(line) // 1_000_000} MHz")
+                break
+
+        # --- Read WiFi status ---
+        click.echo(f"\nWiFi Status:")
+        click.echo("-" * 40)
+        response = run_command(
+            "import network; w=network.WLAN(network.STA_IF); "
+            "print(w.isconnected(), w.ifconfig())"
+        )
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("True") or line.startswith("False"):
+                parts = line.split(" ", 1)
+                connected = parts[0] == "True"
+                click.echo(f"  Connected:    {'Yes' if connected else 'No'}")
+                if connected and len(parts) > 1:
+                    try:
+                        # ifconfig returns (ip, subnet, gateway, dns)
+                        ifconfig = eval(parts[1])  # noqa: S307
+                        click.echo(f"  IP Address:   {ifconfig[0]}")
+                        click.echo(f"  Subnet:       {ifconfig[1]}")
+                        click.echo(f"  Gateway:      {ifconfig[2]}")
+                        click.echo(f"  DNS:          {ifconfig[3]}")
+                    except Exception:
+                        click.echo(f"  Network info: {parts[1]}")
+                break
+
+        # --- Read secrets.json (masked) ---
+        click.echo(f"\nServer Config:")
+        click.echo("-" * 40)
+        response = run_command(
+            "import json; f=open('secrets.json','r'); c=json.load(f); f.close(); "
+            "print(json.dumps(c))"
+        )
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    config = json.loads(line)
+                    click.echo(f"  Server URL:   {config.get('server_url', 'not set')}")
+                    token = config.get("device_token", "")
+                    if token:
+                        # Mask the token for security (show first 8 chars only)
+                        click.echo(f"  Device Token: {token[:8]}...{'*' * 20}")
+                    else:
+                        click.echo("  Device Token: not set")
+                    wifi = config.get("wifi_networks", config.get("wifi_ssid", "not set"))
+                    if isinstance(wifi, list):
+                        click.echo(f"  WiFi Networks: {len(wifi)} configured")
+                    else:
+                        click.echo(f"  WiFi SSID:    {wifi}")
+                except json.JSONDecodeError:
+                    click.echo("  Could not parse secrets.json")
+                break
+        else:
+            click.echo("  secrets.json: not found (run pico-cli provision)")
+
+        ser.close()
+        click.echo(f"\n{'=' * 40}")
+        click.echo("Status read complete.")
+
+    except serial.SerialException as e:
+        click.echo(f"\nSerial error: {e}", err=True)
+        click.echo("Make sure no other program (Thonny, etc.) has the port open.")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"\nError: {e}", err=True)
+        sys.exit(1)
+
+
 # Entry point: this is what runs when you type 'pico-cli' on the command line.
 # The pyproject.toml maps 'pico-cli' -> 'pico_cli.main:cli', so this function
 # is called directly.
