@@ -355,7 +355,8 @@ def provision_pico(
         "device_id": device_id,
         "port": port,
         "secrets_written": {
-            k: ("***" if "password" in k or "token" in k else v)
+            # only mask  after 4 letters of anything sensitive like passwords or tokens, e.g. "abc123..." becomes "abc1***"
+            k: (f"{v[:4]}***" if "password" in k or "token" in k else v)
             for k, v in secrets.items()
         },
     }
