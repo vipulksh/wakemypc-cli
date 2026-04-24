@@ -317,18 +317,22 @@ def upload(port, firmware_dir, files):
 # ---------------------------------------------------------------------------
 
 
-@cli.command()
+@cli.command(context_settings=dict(help_option_names=["-h", "--help"]))
 @click.option(
     "--server-url",
-    required=True,
+    required=False,
     help="URL of your Django server (e.g. https://example.com)",
 )
-@click.option("--wifi-ssid", default=None, help="WiFi network name (SSID)")
-@click.option("--wifi-pass", default=None, help="WiFi password")
+@click.option("-a", "--add-new-wifi", required=False, is_flag=True, help="Add new WiFi network instead of replacing existing ones")
+@click.option("-c", "--clear-wifi", required=False, is_flag=True, help="Clear all existing WiFi networks from config")
+@click.option("-r", "--remove-wifi", required=False, is_flag=True, help="Remove existing WiFi networks (use with --wifi-ssid to specify which one to remove)")
+@click.option("--wifi-ssid", help="WiFi network name (SSID)")
+@click.option("--wifi-pass", help="WiFi password")
 @click.option(
     "--port", default=None, help="Serial port (auto-detected if not specified)"
 )
-def provision(server_url, wifi_ssid, wifi_pass, port):
+@click.option("--order", required=False, type=int, help="Order value for the WiFi network (lower is tried first)")
+def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, remove_wifi, order):
     """
     Write WiFi and server configuration to the Pico's secrets.json.
 
@@ -341,14 +345,64 @@ def provision(server_url, wifi_ssid, wifi_pass, port):
     Examples:
 
       First-time setup (all fields required):
-        pico-cli provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret123
+        pico-cli provision --server-url https://example.com --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
 
       Update just the server URL (keep existing WiFi):
         pico-cli provision --server-url https://new-server.com
-    """
+        
+        Add a new WiFi network without removing existing ones:
+        pico-cli provision --add-new-wifi --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+        pico-cli provision -a --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+        (The --order flag is optional but can be used to control the priority of WiFi networks)
+
+        Clear all WiFi networks and set a new one:
+        pico-cli provision --clear-wifi --wifi-ssid FreshNetwork --wifi-pass freshpass
+        pico-cli provision -c --wifi-ssid FreshNetwork --wifi-pass freshpass
+
+        Clear all WiFi networks without adding a new one:
+        pico-cli provision --clear-wifi
+        pico-cli provision -c
+
+        Remove a specific WiFi network:
+        pico-cli provision --remove-wifi --wifi-ssid NetworkToRemove
+        pico-cli provision -r --wifi-ssid NetworkToRemove
+
+    Notes: 
+     - You can run this command multiple times to update the configuration as needed.
+     - If you change the server URL, make sure to also update it on the server side if necessary.
+     - If you change WiFi credentials, the Pico will use the new ones on next boot.
+     """
     from .serial_detect import get_single_pico_port
     from .provision import provision_pico
 
+    
+    # If user runs without required args → show help instead of error
+    if not (
+        server_url
+        or (add_new_wifi and wifi_ssid and wifi_pass)
+        or clear_wifi
+        or (remove_wifi and wifi_ssid)
+    ):
+        click.echo("\nMissing required options.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
+    # Validate incompatible options
+    if add_new_wifi and clear_wifi:
+        click.echo("\nCannot use --add-new-wifi and --clear-wifi together.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
+    if remove_wifi and clear_wifi:
+        click.echo("\nCannot use --remove-wifi and --clear-wifi together.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
+    if remove_wifi and not wifi_ssid:
+        click.echo("\nTo remove a WiFi network, you must specify the SSID with --wifi-ssid.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
+    if order is not None and not add_new_wifi:
+        click.echo("\nThe --order option can only be used when adding a new WiFi network with --add-new-wifi.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
     try:
         port = get_single_pico_port(port)
     except RuntimeError as e:
@@ -363,12 +417,32 @@ def provision(server_url, wifi_ssid, wifi_pass, port):
             server_url=server_url,
             wifi_ssid=wifi_ssid,
             wifi_password=wifi_pass,
+            add_new_wifi=add_new_wifi,
+            clear_wifi=clear_wifi,
+            remove_wifi=remove_wifi,
+            order=order,
         )
         click.echo(f"\nDevice ID: {result['device_id']}")
         click.echo(f"Port:      {result['port']}")
         click.echo("\nConfiguration written to secrets.json:")
         for key, value in result["secrets_written"].items():
-            click.echo(f"  {key}: {value}")
+            # For sensitive fields, we show a masked or summarized version instead of the raw value
+            if key in ["server_url", 
+                       "device_id", 
+                       "wifi_networks", 
+                       "device_token"]:
+                display_value = value
+                if key == "device_token":
+                    display_value = value[:8] + "..." if value != "" else "not set"
+                elif key == "wifi_networks":
+                    # Dispaly only the SSIDs and orders of the configured WiFi networks, not the passwords
+                    display_value = [
+                        f"{net['ssid']} (order: {net.get('order', 0)})"
+                        for net in value
+                    ] if value else "not set"
+                else:
+                    display_value = value or "not set"
+                click.echo(f"  {key}: {display_value}")
         click.echo("\nProvisioning complete!")
         click.echo("Next step: register with 'pico-cli register' to get a device_token")
     except RuntimeError as e:
@@ -408,16 +482,23 @@ def register(api_url, username, password, port, name):
     Register this Pico on the Django server and get a device_token.
 
     This command:
-      1. Logs into the server with your credentials.
-      2. Reads the Pico's unique hardware ID.
-      3. Registers the device on the server.
-      4. Writes the device_token back to the Pico's secrets.json.
+
+        1. Logs into the server with your credentials.
+
+        2. Reads the Pico's unique hardware ID.
+
+        3. Registers the device on the server.
+
+        4. Writes the device_token back to the Pico's secrets.json.
 
     After registration, the Pico can authenticate with the server
     to send sensor data.
 
-    IMPORTANT: The device_token is shown only once! Save it somewhere safe.
-    If you lose it, you will need to regenerate it via the server's web interface.
+    Example usage:
+
+    pico-cli register --api-url https://example.com --username admin --password pass
+
+    pico-cli register --api-url https://example.com --username admin --password pass --name "Kitchen Sensor"
     """
     from .serial_detect import get_single_pico_port
     from .register import register_and_provision
@@ -607,28 +688,44 @@ def status(port):
         # --- Read WiFi status ---
         click.echo(f"\nWiFi Status:")
         click.echo("-" * 40)
+
         response = run_command(
-            "import network; w=network.WLAN(network.STA_IF); "
-            "print(w.isconnected(), w.ifconfig())"
+            "import network, json; "
+            "w = network.WLAN(network.STA_IF); "
+            "print('__JSON__:' + json.dumps({"
+            "'active': w.active(), "
+            "'connected': w.isconnected(), "
+            "'ifconfig': w.ifconfig()"
+            "}))"
         )
-        for line in response.strip().split("\n"):
+
+        data = None
+
+        for line in response.splitlines():
             line = line.strip()
-            if line.startswith("True") or line.startswith("False"):
-                parts = line.split(" ", 1)
-                connected = parts[0] == "True"
-                click.echo(f"  Connected:    {'Yes' if connected else 'No'}")
-                if connected and len(parts) > 1:
-                    try:
-                        # ifconfig returns (ip, subnet, gateway, dns)
-                        ifconfig = eval(parts[1])  # noqa: S307
-                        click.echo(f"  IP Address:   {ifconfig[0]}")
-                        click.echo(f"  Subnet:       {ifconfig[1]}")
-                        click.echo(f"  Gateway:      {ifconfig[2]}")
-                        click.echo(f"  DNS:          {ifconfig[3]}")
-                    except Exception:
-                        click.echo(f"  Network info: {parts[1]}")
+            if line.startswith("__JSON__:"):
+                try:
+                    payload = line.split("__JSON__:", 1)[1]
+                    data = json.loads(payload)
+                except Exception:
+                    data = None
                 break
 
+        if not data:
+            click.echo("  WiFi: unable to read status")
+            click.echo("  Raw output:")
+            for l in response.splitlines():
+                click.echo(f"    {l}")
+        else:
+            click.echo(f"  Active:       {'Yes' if data['active'] else 'No'}")
+            click.echo(f"  Connected:    {'Yes' if data['connected'] else 'No'}")
+
+            if data["active"] and data["connected"]:
+                ip, subnet, gateway, dns = data["ifconfig"]
+                click.echo(f"  IP Address:   {ip}")
+                click.echo(f"  Subnet:       {subnet}")
+                click.echo(f"  Gateway:      {gateway}")
+                click.echo(f"  DNS:          {dns}")
         # --- Read secrets.json (masked) ---
         click.echo(f"\nServer Config:")
         click.echo("-" * 40)

@@ -106,7 +106,7 @@ def read_device_id(port, baudrate=115200):
 
 def read_current_secrets(port, baudrate=115200):
     """
-    Read the current secrets.json from the Pico (if it exists).
+    Read secrets.json from Pico safely via serial REPL.
 
     This lets us preserve existing settings when updating only some fields.
     For example, if the user only wants to change the WiFi password, we can
@@ -114,52 +114,55 @@ def read_current_secrets(port, baudrate=115200):
 
     Returns:
         A dict of the current secrets, or an empty dict if no secrets.json exists.
+
     """
+    import json
+    import time
+    import serial
+
     ser = serial.Serial(port, baudrate, timeout=2)
     time.sleep(0.5)
 
-    ser.write(b"\r\x03\x03")
-    time.sleep(0.5)
-    ser.read(ser.in_waiting)
+    try:
+        # Interrupt anything running
+        ser.write(b"\r\x03\x03")
+        time.sleep(0.2)
+        ser.read(ser.in_waiting or 1)
 
-    # Try to read the file. If it does not exist, we catch the error.
-    command = (
-        "try:\n"
-        '    f = open("secrets.json", "r")\n'
-        "    data = f.read()\n"
-        "    f.close()\n"
-        '    print("SECRETS:" + data)\n'
-        "except:\n"
-        '    print("SECRETS:__NONE__")\n'
-    )
-    # Use raw REPL mode (Ctrl+A) for multi-line commands
-    ser.write(b"\x01")  # Enter raw REPL mode (Ctrl+A)
-    time.sleep(0.2)
-    ser.read(ser.in_waiting)
+        # Safe Python command with explicit marker
+        cmd = (
+            "import json\n"
+            "try:\n"
+            "    f = open('secrets.json')\n"
+            "    data = json.loads(f.read())\n"
+            "    f.close()\n"
+            "    print('__SECRETS__:' + json.dumps(data))\n"
+            "except Exception as e:\n"
+            "    print('__SECRETS__:__NONE__')\n"
+        )
 
-    ser.write(command.encode() + b"\x04")  # Ctrl+D to execute
-    time.sleep(1)
+        ser.write(cmd.encode() + b"\r\n")
+        time.sleep(0.8)
 
-    response = ser.read(ser.in_waiting).decode(errors="replace")
+        response = ser.read(ser.in_waiting or 4096).decode(errors="replace")
 
-    # Exit raw REPL mode
-    ser.write(b"\x02")  # Ctrl+B to return to normal REPL
-    time.sleep(0.2)
-    ser.close()
+        for line in response.splitlines():
+            line = line.strip()
+            if line.startswith("__SECRETS__:"):
+                payload = line.split("__SECRETS__:", 1)[1].strip()
 
-    # Parse the response
-    for line in response.split("\n"):
-        line = line.strip()
-        if line.startswith("SECRETS:"):
-            payload = line.split("SECRETS:", 1)[1]
-            if payload == "__NONE__":
-                return {}
-            try:
-                return json.loads(payload)
-            except json.JSONDecodeError:
-                return {}
+                if payload == "__NONE__":
+                    return {}
 
-    return {}
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    return {}
+
+        return {}
+
+    finally:
+        ser.close()
 
 
 def write_secrets(port, secrets_dict, baudrate=115200):
@@ -231,11 +234,15 @@ def write_secrets(port, secrets_dict, baudrate=115200):
 
 def provision_pico(
     port,
-    server_url,
+    server_url=None,
     wifi_ssid=None,
     wifi_password=None,
+    add_new_wifi=False,
+    clear_wifi=False,
     device_token=None,
     merge_existing=True,
+    remove_wifi=False,
+    order=None,
 ):
     """
     High-level provisioning function: write configuration to a Pico.
@@ -244,11 +251,14 @@ def provision_pico(
 
     Parameters:
         port:            Serial port path
-        server_url:      URL of the Django server (required)
+        server_url:      URL of the server (required)
         wifi_ssid:       WiFi network name (optional if already configured)
         wifi_password:   WiFi password (optional if already configured)
         device_token:    Device authentication token (optional if already configured)
         merge_existing:  If True, keep existing settings that are not being overridden
+        order:           Helpful when adding multiple WiFi networks over time. Networks with lower order values are tried first. If not provided, networks will be tried in the order they appear in the list.
+        add_new_wifi:    If True, add the provided WiFi network to the existing list instead of replacing it
+        clear_wifi:      If True, clear all existing WiFi networks from the config
 
     The function:
       1. Reads the device_id from the Pico's hardware.
@@ -258,7 +268,8 @@ def provision_pico(
     """
     # Step 1: Read the hardware device ID
     device_id = read_device_id(port)
-
+    # Websocket endpoint path is based on device_id, e.g. "/ws/pico/e6614103.../"
+    path = f"/ws/pico/{device_id}/"
     # Step 2: Optionally read existing secrets to merge with
     existing = {}
     if merge_existing:
@@ -267,32 +278,76 @@ def provision_pico(
         except Exception:
             # If we cannot read existing secrets, start fresh
             existing = {}
-
     # Step 3: Build the new secrets dictionary.
     # For each field, use the provided value if given, otherwise fall back
     # to the existing value, otherwise use a placeholder.
-    secrets = {
-        "device_id": device_id,
-        "server_url": server_url,
-        "wifi_ssid": wifi_ssid or existing.get("wifi_ssid", ""),
-        "wifi_password": wifi_password or existing.get("wifi_password", ""),
-        "device_token": device_token or existing.get("device_token", ""),
-    }
-
-    # Validate that we have the minimum required configuration
-    missing = []
-    if not secrets["wifi_ssid"]:
-        missing.append("wifi_ssid (use --wifi-ssid)")
-    if not secrets["wifi_password"]:
-        missing.append("wifi_password (use --wifi-pass)")
-
-    if missing and not existing:
-        raise RuntimeError(
-            "Missing required configuration:\n"
-            + "\n".join(f"  - {m}" for m in missing)
-            + "\n\nThese are required for the Pico to connect to WiFi."
-        )
-
+    if add_new_wifi:
+        secrets = {
+            "device_id": device_id,
+            "device_token": device_token or existing.get("device_token", ""),
+            "server_url": server_url or existing.get("server_url", ""),
+            "ws_endpoint": (server_url or existing.get("server_url", "")) + path,
+            "wifi_networks": existing.get("wifi_networks", []),
+        }
+        if wifi_ssid and wifi_password:
+            # Check if the SSID already exists in the list
+            if any(net.get("ssid") == wifi_ssid for net in secrets["wifi_networks"]):
+                # If it exists, update the password
+                for net in secrets["wifi_networks"]:
+                    if net.get("ssid") == wifi_ssid:
+                        net["password"] = wifi_password
+            else:
+                # If it does not exist, add a new entry
+                secrets["wifi_networks"].append(
+                    {"ssid": wifi_ssid, "password": wifi_password, "order": order or 0}
+                )
+    elif clear_wifi:
+        secrets = {
+            "device_id": device_id,
+            "device_token": device_token or existing.get("device_token", ""),
+            "server_url": server_url or existing.get("server_url", ""),
+            "ws_endpoint": (server_url or existing.get("server_url", "")) + path,
+            "wifi_networks": [],
+        }
+        if wifi_ssid or wifi_password:
+            if not (wifi_ssid and wifi_password):
+                raise RuntimeError(
+                    "To set a WiFi network when using --clear-wifi, you must provide both --wifi-ssid and --wifi-pass."
+                )
+            # If user provided new WiFi info, add it as the only network
+            secrets["wifi_networks"] = [{
+                "ssid": wifi_ssid,
+                "password": wifi_password,
+                "order": 0
+            }]
+    elif remove_wifi:
+        if not wifi_ssid:
+            raise RuntimeError(
+                "To remove a WiFi network, you must specify the SSID with --wifi-ssid."
+            )
+        secrets = {
+            "device_id": device_id,
+            "device_token": device_token or existing.get("device_token", ""),
+            "server_url": server_url or existing.get("server_url", ""),
+            "ws_endpoint": (server_url or existing.get("server_url", "")) + path,
+            "wifi_networks": [
+                net for net in existing.get("wifi_networks", [])
+                if net.get("ssid") != wifi_ssid
+            ],
+        }
+    else:
+        # Default behavior: replace WiFi config if new SSID/password provided, otherwise keep existing
+        secrets = {
+            "device_id": device_id,
+            "device_token": device_token or existing.get("device_token", ""),
+            "server_url": server_url or existing.get("server_url", ""),
+            "ws_endpoint": (server_url or existing.get("server_url", "")) + path,
+            "wifi_networks": (
+                [{"ssid": wifi_ssid, "password": wifi_password, "order": order or 0}]
+                if wifi_ssid and wifi_password
+                else existing.get("wifi_networks", [])
+            ),
+        }
     # Step 4: Write to the Pico
     write_secrets(port, secrets)
 

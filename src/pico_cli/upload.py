@@ -1,33 +1,54 @@
 """
-upload.py -- Upload Python files to the Pico's filesystem (RAW REPL VERSION)
-============================================================================
+upload.py -- Upload Python files to the Pico's filesystem
+==========================================================
 
-WHAT CHANGED
-------------
-We now use RAW REPL instead of the interactive REPL.
+THE PICO HAS TWO SEPARATE STORAGE AREAS
+----------------------------------------
+This is a common source of confusion, so let's be very clear:
 
-Raw REPL:
-  - No prompts (no >>>)
-  - No echo
-  - No line parsing issues
-  - Designed for automation (like mpremote)
+  1. FIRMWARE (flash memory):
+     - This is where MicroPython itself lives.
+     - Installed via .uf2 file in BOOTSEL mode (see flash.py).
+     - You do NOT touch this when uploading your application code.
 
-Protocol:
-  Ctrl+C → stop program
-  Ctrl+A → enter raw REPL
-  send code
-  Ctrl+D → execute
-  Ctrl+B → exit raw REPL
+  2. FILESYSTEM (internal file system):
+     - This is a small filesystem (~800KB on Pico W 2) on top of the flash.
+     - This is where YOUR Python scripts live (main.py, secrets.json, etc.).
+     - MicroPython automatically runs main.py on boot (if it exists).
+     - You upload files here via serial connection (USB cable, normal mode).
 
-This eliminates:
-  ❌ buffer truncation
-  ❌ prompt race conditions
-  ❌ multiline parsing issues
+Think of it like a computer: the firmware is like Windows/macOS/Linux, and the
+filesystem is like your Documents folder where your own files live.
 
-Result:
-  ✅ Fast
-  ✅ Reliable
-  ✅ Production-grade
+HOW mpremote WORKS
+------------------
+mpremote is the official tool from the MicroPython project for managing Pico devices.
+It communicates over the USB serial connection (the same connection you would use
+to type Python commands manually).
+
+mpremote can:
+  - Copy files to/from the Pico:  mpremote cp local_file.py :remote_file.py
+  - Run a script on the Pico:     mpremote run script.py
+  - List files on the Pico:       mpremote ls
+  - Enter the REPL:               mpremote repl
+  - Reset the Pico:               mpremote reset
+
+The colon (:) prefix means "on the Pico". So ":main.py" means the file called
+main.py on the Pico's filesystem.
+
+FALLBACK: SERIAL REPL
+----------------------
+If mpremote is not installed, we fall back to sending raw Python commands over
+the serial REPL (Read-Eval-Print Loop). This is slower and more fragile, but
+works without any extra tools.
+
+The REPL is like a Python interactive shell running on the Pico. You type
+Python code, the Pico executes it, and sends back the result. We use this to
+write files by sending commands like:
+
+    f = open("main.py", "w")
+    f.write("print('hello')")
+    f.close()
 """
 
 import subprocess
@@ -37,10 +58,6 @@ from pathlib import Path
 
 import serial
 
-
-# -----------------------------------------------------------------------------
-# MPREMOTE (PREFERRED)
-# -----------------------------------------------------------------------------
 
 def is_mpremote_available():
     """
@@ -71,48 +88,63 @@ def upload_via_mpremote(port, local_files, remote_dir="/"):
     for local_path in local_files:
         local_path = Path(local_path)
         if not local_path.exists():
-            results.append({
-                "file": str(local_path),
-                "success": False,
-                "error": f"File not found: {local_path}",
-            })
+            results.append(
+                {
+                    "file": str(local_path),
+                    "success": False,
+                    "error": f"File not found: {local_path}",
+                }
+            )
             continue
 
-        # Build the remote path on the Pico.
-        # The ":" prefix tells mpremote this is a path on the device (not the host).
+        # The remote path on the Pico.
+        # ":" prefix tells mpremote this is a path on the device.
         remote_path = f":{remote_dir.rstrip('/')}/{local_path.name}"
 
         cmd = ["mpremote", "connect", port, "cp", str(local_path), remote_path]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             if result.returncode == 0:
-                results.append({
-                    "file": str(local_path),
-                    "remote": remote_path.lstrip(":"),
-                    "success": True,
-                })
+                results.append(
+                    {
+                        "file": str(local_path),
+                        "remote": remote_path.lstrip(":"),
+                        "success": True,
+                    }
+                )
             else:
-                results.append({
+                results.append(
+                    {
+                        "file": str(local_path),
+                        "success": False,
+                        "error": result.stderr.strip() or "Unknown error",
+                    }
+                )
+        except subprocess.TimeoutExpired:
+            results.append(
+                {
                     "file": str(local_path),
                     "success": False,
-                    "error": result.stderr.strip() or "Unknown error",
-                })
-
-        except subprocess.TimeoutExpired:
-            results.append({
-                "file": str(local_path),
-                "success": False,
-                "error": "Upload timed out",
-            })
+                    "error": "Upload timed out after 30 seconds",
+                }
+            )
+        except FileNotFoundError:
+            results.append(
+                {
+                    "file": str(local_path),
+                    "success": False,
+                    "error": "mpremote not found. Install it with: pip install mpremote",
+                }
+            )
 
     return results
 
-
-# -----------------------------------------------------------------------------
-# RAW REPL IMPLEMENTATION
-# -----------------------------------------------------------------------------
 
 def upload_via_serial_repl(port, local_files, remote_dir="/", baudrate=115200):
     """
@@ -137,175 +169,151 @@ def upload_via_serial_repl(port, local_files, remote_dir="/", baudrate=115200):
     results = []
 
     try:
-        # Establish serial connection to the Pico
+        # Open the serial connection.
+        # Think of this like opening a chat window with the Pico.
         ser = serial.Serial(port, baudrate, timeout=2)
-        # Give the device time to stabilize after connection
-        time.sleep(0.5)
+        time.sleep(0.5)  # Give the connection a moment to stabilize
 
-        # Enter raw REPL mode (machine-friendly protocol)
-        _enter_raw_repl(ser)
+        # Interrupt any running program on the Pico by sending Ctrl+C.
+        # This drops us into the interactive Python prompt (>>>).
+        ser.write(b"\r\x03\x03")
+        time.sleep(0.5)
+        ser.read(ser.in_waiting)  # Clear the input buffer
 
         for local_path in local_files:
             local_path = Path(local_path)
-
             if not local_path.exists():
-                results.append({
-                    "file": str(local_path),
-                    "success": False,
-                    "error": f"File not found: {local_path}",
-                })
+                results.append(
+                    {
+                        "file": str(local_path),
+                        "success": False,
+                        "error": f"File not found: {local_path}",
+                    }
+                )
                 continue
 
-            # Build the remote path and read the file contents
             remote_path = f"{remote_dir.rstrip('/')}/{local_path.name}"
-            content = local_path.read_bytes()
+            content = local_path.read_text()
 
             try:
-                # Transfer the file to the Pico
-                _write_file_raw(ser, remote_path, content)
-                results.append({
-                    "file": str(local_path),
-                    "remote": remote_path,
-                    "success": True,
-                })
+                _write_file_via_repl(ser, remote_path, content)
+                results.append(
+                    {
+                        "file": str(local_path),
+                        "remote": remote_path,
+                        "success": True,
+                    }
+                )
             except Exception as e:
-                results.append({
-                    "file": str(local_path),
-                    "success": False,
-                    "error": str(e),
-                })
+                results.append(
+                    {
+                        "file": str(local_path),
+                        "success": False,
+                        "error": str(e),
+                    }
+                )
 
-        # Exit raw REPL and close the connection
-        _exit_raw_repl(ser)
         ser.close()
 
     except serial.SerialException as e:
+        # If we cannot even open the serial port, all files fail
         for local_path in local_files:
-            results.append({
-                "file": str(local_path),
-                "success": False,
-                "error": f"Serial connection failed: {e}",
-            })
+            results.append(
+                {
+                    "file": str(local_path),
+                    "success": False,
+                    "error": f"Serial connection failed: {e}",
+                }
+            )
 
     return results
 
 
-# -----------------------------------------------------------------------------
-# RAW REPL HELPERS
-# -----------------------------------------------------------------------------
-
-def _enter_raw_repl(ser):
-    """Enter raw REPL mode on the Pico. Raw REPL is machine-friendly with no prompts."""
-    # Send Ctrl+C twice to interrupt any running program
-    ser.write(b"\r\x03\x03")
-    time.sleep(0.1)
-
-    # Send Ctrl+A to enter raw REPL mode
-    ser.write(b"\r\x01")
-    time.sleep(0.1)
-
-    # Flush any buffered output from the device
-    ser.read(ser.in_waiting)
-
-
-def _exit_raw_repl(ser):
-    """Exit raw REPL mode and return to normal interactive REPL."""
-    # Send Ctrl+B to exit raw REPL
-    ser.write(b"\r\x02")
-    time.sleep(0.1)
-
-
-def _exec_raw(ser, code, timeout=5):
+def _write_file_via_repl(ser, remote_path, content):
     """
-    Send Python code in raw REPL mode and execute it.
+    Write a single file to the Pico by sending Python commands over serial.
 
-    Parameters:
-        ser:     Serial connection object
-        code:    Python code as a string
-        timeout: Maximum seconds to wait for execution and response
+    We send commands like:
+        f = open("/main.py", "w")
+        f.write("...chunk of content...")
+        f.write("...next chunk...")
+        f.close()
 
-    Raises:
-        RuntimeError: If the code execution produces a traceback or error
+    The content is sent in small chunks (256 bytes) to avoid overflowing the
+    Pico's serial input buffer. After each command, we wait briefly for the
+    Pico to process it.
     """
-    # Encode and send the Python code
-    ser.write(code.encode())
-    # Send Ctrl+D to execute the code
-    ser.write(b"\x04")
+    # Open the file for writing on the Pico
+    _send_repl_command(ser, f'__f = open("{remote_path}", "w")')
 
+    # Send content in chunks to avoid buffer overflow.
+    # The Pico's serial input buffer is limited (usually 256-512 bytes),
+    # so we must not send too much data at once.
+    chunk_size = 256
+    for i in range(0, len(content), chunk_size):
+        chunk = content[i : i + chunk_size]
+        # Escape backslashes and quotes so the Python string is valid
+        escaped = (
+            chunk.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
+        _send_repl_command(ser, f'__f.write("{escaped}")')
+
+    # Close the file
+    _send_repl_command(ser, "__f.close()")
+    _send_repl_command(ser, "del __f")
+
+
+def _send_repl_command(ser, command, timeout=3):
+    """
+    Send a single Python command to the Pico's REPL and wait for the prompt.
+
+    The REPL works like this:
+      1. We send a line of Python code followed by Enter (\\r\\n).
+      2. The Pico executes it.
+      3. The Pico sends back any output, followed by the ">>> " prompt.
+      4. We wait until we see ">>> " to know the command finished.
+    """
+    ser.write(command.encode() + b"\r\n")
+    time.sleep(0.1)
+
+    # Read the response and wait for the prompt
     response = b""
     start = time.time()
-
-    # Read all output from the device until timeout
     while time.time() - start < timeout:
         if ser.in_waiting:
             response += ser.read(ser.in_waiting)
-        time.sleep(0.01)
+            if b">>> " in response:
+                break
+        time.sleep(0.05)
 
-    # Check for execution errors in the response
+    # Check for errors in the response
     if b"Traceback" in response or b"Error" in response:
-        raise RuntimeError(response.decode(errors="replace"))
+        raise RuntimeError(f"REPL error: {response.decode(errors='replace')}")
 
-    return response
+    return response.decode(errors="replace")
 
-
-def _write_file_raw(ser, remote_path, content):
-    """
-    Write a file to the Pico using raw REPL mode.
-
-    Strategy:
-      1. Build a Python script that opens a file and writes chunks
-      2. Send all commands at once (safe in raw REPL, no buffer truncation)
-      3. Execute the script in one operation
-
-    Parameters:
-        ser:          Serial connection object
-        remote_path:  Full path on the Pico where file will be written
-        content:      Bytes to write to the file
-    """
-    # Chunk size is larger in raw REPL since there's no prompt parsing overhead
-    chunk_size = 512
-
-    # Build the Python script that will execute on the Pico
-    lines = [f'__f = open("{remote_path}", "wb")']
-
-    # Split content into chunks and add write commands for each
-    for i in range(0, len(content), chunk_size):
-        chunk = content[i:i + chunk_size]
-        # Use repr() to safely encode binary data as a Python bytes literal
-        lines.append(f"__f.write({repr(chunk)})")
-
-    # Close the file after all data is written
-    lines.append("__f.close()")
-
-    # Combine all lines into a single script and execute it
-    script = "\n".join(lines) + "\n"
-    _exec_raw(ser, script)
-
-
-# -----------------------------------------------------------------------------
-# ENTRYPOINT
-# -----------------------------------------------------------------------------
 
 def upload_files(port, local_files, remote_dir="/"):
+    """
+    Upload files to the Pico, using the best available method.
+
+    Tries mpremote first (faster, more reliable), falls back to serial REPL.
+    """
     if is_mpremote_available():
         return upload_via_mpremote(port, local_files, remote_dir)
-    return upload_via_serial_repl(port, local_files, remote_dir)
+    else:
+        return upload_via_serial_repl(port, local_files, remote_dir)
 
 
 def list_files_on_pico(port, baudrate=115200):
     """
-    List files in the root directory of the Pico.
+    List files on the Pico's filesystem.
 
-    Attempts to use mpremote if available (preferred), falls back to serial REPL.
-
-    Parameters:
-        port:      Serial port path
-        baudrate:  Communication speed (115200 is standard for MicroPython)
-
-    Returns:
-        String containing the directory listing, or an error message
+    Uses mpremote if available, otherwise falls back to serial REPL.
     """
-    # Try mpremote first (faster and more reliable)
     if is_mpremote_available():
         try:
             result = subprocess.run(
@@ -316,23 +324,18 @@ def list_files_on_pico(port, baudrate=115200):
             )
             return result.stdout.strip()
         except Exception:
-            # Silently fall through to serial method if mpremote fails
             pass
 
-    # Fallback: use serial REPL to list files
+    # Fallback: use REPL to list files
     try:
         ser = serial.Serial(port, baudrate, timeout=2)
         time.sleep(0.5)
+        ser.write(b"\r\x03\x03")
+        time.sleep(0.5)
+        ser.read(ser.in_waiting)
 
-        _enter_raw_repl(ser)
-
-        # Execute Python command to list files and capture the output
-        output = _exec_raw(ser, "import os; print(os.listdir('/'))")
-
-        _exit_raw_repl(ser)
+        output = _send_repl_command(ser, "import os; print(os.listdir('/'))")
         ser.close()
-
-        return output.decode(errors="replace")
-
+        return output
     except Exception as e:
         return f"Error listing files: {e}"

@@ -70,7 +70,7 @@ def login_to_server(api_url, username, password):
     """
     # Remove trailing slash for consistent URL building
     api_url = api_url.rstrip("/")
-    token_url = f"{api_url}/api/auth/token/"
+    token_url = f"{api_url}/api/jwtauth/login/"
 
     try:
         response = requests.post(
@@ -126,7 +126,7 @@ def register_device(api_url, access_token, device_id, device_name=None):
     Register a Pico device on the Django server.
 
     Parameters:
-        api_url:      Base URL of the server
+        api_url:      Base URL of the website (e.g. https://example.com)
         access_token: JWT from login_to_server()
         device_id:    The Pico's unique hardware ID (hex string)
         device_name:  Optional human-friendly name, e.g. "Kitchen Pico"
@@ -178,6 +178,14 @@ def register_device(api_url, access_token, device_id, device_name=None):
         }
 
     elif response.status_code == 400:
+        if "name" in response.json():
+            # Server response: {"name":["This field is required."]}
+            raise RuntimeError(
+                f"Registration failed (400 Bad Request).\n"
+                f"Device name is required.\n"
+                f"Server response: {response.text[:500]}\n"
+                f"Pass --name to provide a name for this pico device."
+            )
         raise RuntimeError(
             f"Registration failed (400 Bad Request).\n"
             f"This Pico may already be registered on the server.\n"
@@ -213,9 +221,9 @@ def register_and_provision(api_url, username, password, port, device_name=None):
       4. Write the device_token back to the Pico's secrets.json.
 
     Parameters:
-        api_url:     Base URL of the Django server
-        username:    Your Django username
-        password:    Your Django password
+        api_url:     Base URL of the website (e.g. https://example.com)
+        username:    Your username
+        password:    Your password
         port:        Serial port of the Pico
         device_name: Optional human-friendly name
 
@@ -246,7 +254,6 @@ def register_and_provision(api_url, username, password, port, device_name=None):
         **existing_secrets,
         "device_id": device_id,
         "device_token": device_token,
-        "server_url": api_url,
     }
     write_secrets(port, secrets)
 
