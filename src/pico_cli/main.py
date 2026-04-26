@@ -111,44 +111,56 @@ def cli():
 @cli.command()
 def detect():
     """
-    List all Raspberry Pi Pico devices connected via USB serial.
+    List every Pico plugged in -- flashed AND unflashed.
 
-    This scans your computer's USB ports for devices with Raspberry Pi's Vendor ID
-    (0x2E8A). It only finds Picos that have MicroPython installed and are in normal
-    mode (not BOOTSEL mode).
+    Scans for two states in one pass:
+      - FLASHED:   Pico is running MicroPython, shows up as a USB serial port.
+      - UNFLASHED: Pico is in BOOTSEL mode, shows up as a USB mass-storage drive.
+                   Use 'pico-cli flash --uf2 <file>' to install MicroPython on it.
 
-    If no Picos are found, make sure:
-      - The Pico is plugged in via USB
-      - MicroPython is installed (use 'pico-cli flash' if not)
-      - The Pico is NOT in BOOTSEL mode (it should not appear as a USB drive)
-      - On Linux: you may need permission (sudo usermod -a -G dialout $USER)
+    Each device printed includes a status badge so you know exactly which step
+    to take next.
     """
-    from .serial_detect import list_pico_serial_ports
+    from .serial_detect import list_all_picos
 
     click.echo("Scanning for Raspberry Pi Pico devices...")
-    picos = list_pico_serial_ports()
+    picos = list_all_picos()
 
     if not picos:
         click.echo("\nNo Pico devices found.")
         click.echo("\nTroubleshooting:")
         click.echo("  - Is the Pico plugged in via USB?")
-        click.echo(
-            "  - Does it have MicroPython installed? (use 'pico-cli flash' first)"
-        )
-        click.echo(
-            "  - Is it in BOOTSEL mode? (BOOTSEL shows as a drive, not a serial port)"
-        )
-        click.echo(
-            "  - On Linux, try: sudo usermod -a -G dialout $USER  (then re-login)"
-        )
+        click.echo("  - To flash MicroPython, hold BOOTSEL while plugging in.")
+        click.echo("  - On Linux you may need: sudo usermod -a -G dialout $USER")
+        click.echo("    (then log out and back in for it to take effect.)")
         sys.exit(1)
 
-    click.echo(f"\nFound {len(picos)} Pico device(s):\n")
-    for p in picos:
-        click.echo(f"  Port:        {p['port']}")
-        click.echo(f"  Description: {p['description']}")
-        click.echo(f"  VID:PID:     {p['vid']:#06x}:{p['pid']:#06x}")
-        click.echo(f"  Serial:      {p['serial']}")
+    flashed = [p for p in picos if p["state"] == "flashed"]
+    unflashed = [p for p in picos if p["state"] == "unflashed"]
+
+    summary = []
+    if flashed:
+        summary.append(f"{len(flashed)} flashed")
+    if unflashed:
+        summary.append(f"{len(unflashed)} unflashed")
+    click.echo(f"\nFound {len(picos)} Pico(s) -- {', '.join(summary)}:\n")
+
+    for p in flashed:
+        click.echo(click.style("  [FLASHED]   ", fg="green", bold=True), nl=False)
+        click.echo(f"running MicroPython on {p['port']}")
+        click.echo(f"              Description: {p['description']}")
+        click.echo(f"              VID:PID:     {p['vid']:#06x}:{p['pid']:#06x}")
+        click.echo(f"              Serial:      {p['serial']}")
+        click.echo()
+
+    for p in unflashed:
+        click.echo(click.style("  [UNFLASHED] ", fg="yellow", bold=True), nl=False)
+        click.echo(f"BOOTSEL mode at {p['mount_path']}")
+        click.echo(f"              Model:    {p['model']}")
+        click.echo(f"              Board ID: {p['board_id']}")
+        click.echo(
+            "              Next step: pico-cli flash --uf2 <path-to-firmware.uf2>"
+        )
         click.echo()
 
 

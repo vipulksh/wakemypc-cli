@@ -35,6 +35,9 @@ serial ports and returns details about each one, including VID and PID. We just
 filter that list to find Raspberry Pi Picos.
 """
 
+import platform
+from pathlib import Path
+
 import serial.tools.list_ports
 
 # Raspberry Pi Foundation USB Vendor ID.
@@ -50,9 +53,100 @@ PICO_SERIAL_PIDS = {
     0x0009,  # RP2350 RISC-V variant
 }
 
-# In BOOTSEL mode the Pico appears as a mass-storage device, not a serial port,
-# so we will not see it via pyserial. We detect BOOTSEL separately by looking
-# for the mounted USB drive (see flash.py).
+# In BOOTSEL mode the Pico appears as a USB mass-storage device, not a serial
+# port -- it never shows up via pyserial. We find those by scanning the OS's
+# mount points for a drive named RPI-RP2 / RP2350 with an INFO_UF2.TXT in it.
+BOOTSEL_DRIVE_NAMES = {"RPI-RP2", "RP2350"}
+
+
+def _read_info_uf2(mount_path):
+    """
+    Parse INFO_UF2.TXT from a BOOTSEL mount. Pico writes useful identification
+    here -- Model and Board-ID lines are the most useful. Returns a dict like
+    {"model": "...", "board_id": "..."}; missing fields are absent.
+    """
+    info = {}
+    try:
+        text = (Path(mount_path) / "INFO_UF2.TXT").read_text(errors="ignore")
+    except OSError:
+        return info
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "model":
+            info["model"] = value
+        elif key == "board-id":
+            info["board_id"] = value
+    return info
+
+
+def list_bootsel_picos():
+    """
+    Find every Pico currently in BOOTSEL mode (unflashed / firmware-update
+    mode) by scanning for the mounted USB mass-storage drives Pico exposes
+    in that state.
+
+    Returns a list of dicts with:
+      - state:      always "unflashed"
+      - mount_path: filesystem path to the mounted drive
+      - model:      e.g. "Raspberry Pi RP2350" (from INFO_UF2.TXT, if readable)
+      - board_id:   e.g. "RPI-RP2350"          (from INFO_UF2.TXT, if readable)
+    """
+    system = platform.system()
+    candidates = []
+
+    if system == "Linux":
+        # Auto-mounted under /media/<user>/ or /run/media/<user>/ depending on DE.
+        for base in (Path("/media"), Path("/run/media")):
+            if not base.exists():
+                continue
+            for user_dir in base.iterdir():
+                if not user_dir.is_dir():
+                    continue
+                for name in BOOTSEL_DRIVE_NAMES:
+                    candidates.append(user_dir / name)
+    elif system == "Darwin":
+        for name in BOOTSEL_DRIVE_NAMES:
+            candidates.append(Path("/Volumes") / name)
+    elif system == "Windows":
+        import string
+
+        for letter in string.ascii_uppercase:
+            candidates.append(Path(f"{letter}:\\"))
+
+    found = []
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if not (candidate / "INFO_UF2.TXT").exists():
+            continue
+        info = _read_info_uf2(candidate)
+        found.append(
+            {
+                "state": "unflashed",
+                "mount_path": str(candidate),
+                "model": info.get("model", "Raspberry Pi Pico (BOOTSEL)"),
+                "board_id": info.get("board_id", "unknown"),
+            }
+        )
+    return found
+
+
+def list_all_picos():
+    """
+    One-stop scan: returns both flashed Picos (running MicroPython, exposed
+    as USB serial) and unflashed Picos (in BOOTSEL mode, mounted as mass
+    storage).
+
+    Each entry has a "state" key: "flashed" or "unflashed". Other keys vary
+    by state -- flashed entries have a "port" + "serial", unflashed entries
+    have a "mount_path" + "board_id".
+    """
+    flashed = [{**p, "state": "flashed"} for p in list_pico_serial_ports()]
+    return flashed + list_bootsel_picos()
 
 
 def list_pico_serial_ports():
