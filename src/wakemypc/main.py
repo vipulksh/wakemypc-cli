@@ -785,8 +785,13 @@ _VERBOSE_PATTERNS = (
     "[ws] Sent:",              # fires on every outbound WS message
     "[scanner] Checking",      # per-device probe start (detail shown by START/END)
     "[main] heartbeat sent",   # every 30s -- use --debug to watch metrics
-    "[main] scan START",       # use --debug to time scans
+    "[main] scan START",       # legacy all-at-once scan
     "[main] scan END",
+    "[main] tick |",           # periodic 5s loop heartbeat (use --debug to watch)
+    "[main] ws recv |",        # one line per received WS message
+    "[main] scan tick |",      # per-device-tick scan start
+    "[main] scan tick done",   # per-device-tick scan end
+    "[ota.http]",              # per-redirect-hop HTTP trace
     "[boot] Free memory:",     # boot banner line
 )
 
