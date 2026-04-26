@@ -831,7 +831,12 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
             while time.time() < deadline:
                 if os.path.exists(port):
                     time.sleep(0.5)
-                    click.echo("[logs] port reappeared, resuming.", err=True)
+                    click.echo(
+                        "[logs] port reappeared; recovering boot logs...",
+                        err=True,
+                    )
+                    _recover_log_buffer_after_reconnect(port, debug=debug)
+                    click.echo("[logs] resuming live stream.", err=True)
                     break
                 time.sleep(0.5)
             else:
@@ -841,6 +846,97 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
                     err=True,
                 )
                 sys.exit(1)
+
+
+def _recover_log_buffer_after_reconnect(port, debug=False):
+    """When the Pico reboots (hardware reset, watchdog), USB CDC drops
+    and reappears. By the time the host reattaches, the boot sequence
+    has already printed -- those bytes are lost in transit because the
+    host wasn't reading. The firmware's log_buffer captures those prints
+    in RAM, so we briefly interrupt main.py via mpremote, dump the
+    buffer, then send Ctrl+D over serial to soft-reset and resume
+    main.py. Ctrl+D doesn't drop USB CDC, so the live stream picks up
+    again without another reconnect cycle (just a quick second boot).
+
+    Side effect: the user sees the boot sequence twice on each
+    reconnect -- once via the recovered buffer, once live from the
+    soft-reset that resumes main.py. That's the price of getting the
+    real boot output without bridging mpremote into the live stream.
+    Best-effort: every step is wrapped so a failure here doesn't kill
+    the live-stream loop.
+    """
+    import json
+    import subprocess
+    import time as _time
+
+    import serial as _serial
+
+    exec_script = (
+        "try:\n"
+        "    from log_buffer import get_dump\n"
+        "    import json as _json\n"
+        "    print('__BUF_BEGIN__')\n"
+        "    print(_json.dumps(get_dump()))\n"
+        "    print('__BUF_END__')\n"
+        "except ImportError:\n"
+        "    print('__NO_LOG_BUFFER__')\n"
+    )
+    try:
+        result = subprocess.run(
+            ["mpremote", "connect", port, "exec", exec_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        click.echo(
+            "[logs] mpremote not installed -- skipping buffer recovery. "
+            "Install with: pip install mpremote",
+            err=True,
+        )
+        return
+    except subprocess.TimeoutExpired:
+        click.echo("[logs] mpremote timed out -- skipping buffer recovery.", err=True)
+        return
+    except Exception as exc:
+        click.echo(f"[logs] buffer recovery failed: {exc}", err=True)
+        return
+
+    out = result.stdout or ""
+    if "__NO_LOG_BUFFER__" in out:
+        click.echo(
+            "[logs] firmware lacks log_buffer (older than v0.2.0) -- "
+            "skipping buffer recovery.",
+            err=True,
+        )
+    elif "__BUF_BEGIN__" in out:
+        payload = out.split("__BUF_BEGIN__", 1)[1].split("__BUF_END__", 1)[0]
+        try:
+            entries = json.loads(payload.strip())
+            click.echo(
+                f"[logs] --- recovered {len(entries)} buffered line(s) ---",
+                err=True,
+            )
+            for entry in entries:
+                line = f"[t={entry.get('t', 0)}ms] {entry.get('msg', '')}"
+                if _line_should_show(line, debug):
+                    sys.stdout.write(line + "\n")
+            click.echo("[logs] --- end recovered ---", err=True)
+            sys.stdout.flush()
+        except json.JSONDecodeError:
+            click.echo(
+                "[logs] couldn't parse log buffer dump (corrupted output).",
+                err=True,
+            )
+
+    # Soft-reset over serial: Ctrl+D from REPL re-runs main.py without
+    # dropping USB CDC, so the live stream picks up the second boot.
+    try:
+        with _serial.Serial(port, 115200, timeout=1) as ser:
+            ser.write(b"\x04")
+            _time.sleep(0.3)
+    except Exception as exc:
+        click.echo(f"[logs] couldn't send Ctrl+D to resume main.py: {exc}", err=True)
 
 
 # ---------------------------------------------------------------------------
