@@ -1,0 +1,46 @@
+# Build sdist + wheel and cut a GitHub Release on tag push.
+#
+# When you push a tag like `v1.0.1`, this workflow:
+#  1. Builds source distribution + wheel via `python -m build`.
+#  2. Creates a GitHub Release using RELEASE_NOTES.md as the body.
+#  3. Attaches the wheel and sdist as release assets.
+#
+# To release:
+#   1. Bump version in pyproject.toml.
+#   2. Edit RELEASE_NOTES.md with the changelog.
+#   3. Commit, tag (e.g. `git tag v1.0.1`), push (`git push origin v1.0.1`).
+
+name: Release CLI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: dist/*
