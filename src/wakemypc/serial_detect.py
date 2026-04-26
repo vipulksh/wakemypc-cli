@@ -212,7 +212,7 @@ def get_single_pico_port(preferred_port=None):
             "\n"
             "Troubleshooting:\n"
             "  1. Is the Pico plugged into your computer via USB?\n"
-            "  2. Does it have MicroPython installed? (If not, use 'pico-cli flash' first)\n"
+            "  2. Does it have MicroPython installed? (If not, use 'wakemypc flash' first)\n"
             "  3. Is it in BOOTSEL mode? (BOOTSEL won't show a serial port)\n"
             "  4. On Linux, do you have permission? Try: sudo usermod -a -G dialout $USER\n"
             "     then log out and back in."
@@ -227,6 +227,6 @@ def get_single_pico_port(preferred_port=None):
         f"Multiple Picos detected. Please specify which one with --port:\n"
         f"{port_list}\n"
         f"\n"
-        f"Tip: use 'pico-cli identify --port /dev/ttyACMx' to blink the LED\n"
+        f"Tip: use 'wakemypc identify --port /dev/ttyACMx' to blink the LED\n"
         f"on a specific Pico so you can tell them apart physically."
     )

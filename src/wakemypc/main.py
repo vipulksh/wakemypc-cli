@@ -15,23 +15,23 @@ THE SETUP WORKFLOW
 ------------------
 Here is the typical order of operations for a brand new Pico:
 
-  1. pico-cli flash --uf2 firmware.uf2
+  1. wakemypc flash --uf2 firmware.uf2
      Install MicroPython on the Pico. You only do this once (or when updating).
      The Pico must be in BOOTSEL mode (hold button while plugging in).
 
-  2. pico-cli detect
+  2. wakemypc detect
      Verify the Pico is detected on a serial port after flashing.
 
-  3. pico-cli upload --firmware-dir ./pico_firmware/
+  3. wakemypc upload --firmware-dir ./pico_firmware/src/
      Upload your application Python files to the Pico's filesystem.
 
-  4. pico-cli provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret
+  4. wakemypc provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret
      Write WiFi credentials and server URL to the Pico's secrets.json.
 
-  5. pico-cli register --api-url https://example.com --username admin --password pass
+  5. wakemypc register --api-url https://example.com --username admin --password pass
      Register the Pico on the server and get a device_token written to it.
 
-  6. pico-cli identify
+  6. wakemypc identify
      Blink the LED to verify which physical Pico you just configured.
 
 After these steps, unplug the Pico and plug it into a power source.
@@ -58,7 +58,7 @@ will install it and reboot. This is how you install or update MicroPython.
 HOW mpremote COPIES FILES
 --------------------------
 mpremote is the official MicroPython tool for managing devices over serial.
-When you run 'pico-cli upload', we use mpremote to copy Python files from your
+When you run 'wakemypc upload', we use mpremote to copy Python files from your
 computer to the Pico's tiny internal filesystem. mpremote connects to the serial
 port, enters a special "raw REPL" mode, and transfers file data efficiently.
 
@@ -82,7 +82,7 @@ ABOUT CLICK
 -----------
 Click is a Python library for building command-line interfaces. It turns
 Python functions into CLI commands using decorators (@click.command, etc.).
-Each function becomes a subcommand like 'pico-cli detect' or 'pico-cli flash'.
+Each function becomes a subcommand like 'wakemypc detect' or 'wakemypc flash'.
 """
 
 import sys
@@ -92,13 +92,13 @@ import click
 
 
 @click.group()
-@click.version_option(version="1.0.0", prog_name="pico-cli")
+@click.version_option(version="1.0.0", prog_name="wakemypc")
 def cli():
     """
     CLI tool to flash, provision, and register Raspberry Pi Pico W 2 transmitters.
 
     This tool runs on your computer and communicates with Pico devices over USB.
-    Use --help on any subcommand for details (e.g. pico-cli flash --help).
+    Use --help on any subcommand for details (e.g. wakemypc flash --help).
     """
     pass
 
@@ -116,7 +116,7 @@ def detect():
     Scans for two states in one pass:
       - FLASHED:   Pico is running MicroPython, shows up as a USB serial port.
       - UNFLASHED: Pico is in BOOTSEL mode, shows up as a USB mass-storage drive.
-                   Use 'pico-cli flash --uf2 <file>' to install MicroPython on it.
+                   Use 'wakemypc flash --uf2 <file>' to install MicroPython on it.
 
     Each device printed includes a status badge so you know exactly which step
     to take next.
@@ -159,7 +159,7 @@ def detect():
         click.echo(f"              Model:    {p['model']}")
         click.echo(f"              Board ID: {p['board_id']}")
         click.echo(
-            "              Next step: pico-cli flash --uf2 <path-to-firmware.uf2>"
+            "              Next step: wakemypc flash --uf2 <path-to-firmware.uf2>"
         )
         click.echo()
 
@@ -196,7 +196,7 @@ def flash(uf2):
         if drive:
             click.echo(f"Pico in BOOTSEL mode detected at: {drive}")
             click.echo("\nTo flash MicroPython, run:")
-            click.echo("  pico-cli flash --uf2 <path-to-firmware.uf2>")
+            click.echo("  wakemypc flash --uf2 <path-to-firmware.uf2>")
             click.echo("\nDownload firmware from: https://micropython.org/download/")
             click.echo("  For Pico W 2, look for 'RPI_PICO2_W'")
         else:
@@ -222,11 +222,11 @@ def flash(uf2):
         port = wait_for_serial_after_flash(timeout=15)
         if port:
             click.echo(f"\nSuccess! Pico is now running MicroPython on {port}")
-            click.echo("Next step: upload your firmware files with 'pico-cli upload'")
+            click.echo("Next step: upload your firmware files with 'wakemypc upload'")
         else:
             click.echo("\nPico did not appear as a serial device within 15 seconds.")
             click.echo(
-                "It may still be booting. Try 'pico-cli detect' in a few seconds."
+                "It may still be booting. Try 'wakemypc detect' in a few seconds."
             )
     except Exception as e:
         click.echo(f"\nError: {e}", err=True)
@@ -259,9 +259,9 @@ def restart(port, bootloader):
     reboot straight into BOOTSEL mode (useful for re-flashing firmware).
 
     Examples:
-      pico-cli restart                     # soft reset
-      pico-cli restart --bootloader        # reboot into flashable BOOTSEL
-      pico-cli restart --port /dev/ttyACM1 # specific Pico when several plugged in
+      wakemypc restart                     # soft reset
+      wakemypc restart --bootloader        # reboot into flashable BOOTSEL
+      wakemypc restart --port /dev/ttyACM1 # specific Pico when several plugged in
     """
     from .restart import restart_pico
     from .serial_detect import get_single_pico_port
@@ -298,11 +298,11 @@ def restart(port, bootloader):
     if bootloader:
         click.echo(
             "Reset sent. The Pico should appear shortly as a USB drive\n"
-            "(RPI-RP2 / RP2350). Run 'pico-cli detect' to confirm."
+            "(RPI-RP2 / RP2350). Run 'wakemypc detect' to confirm."
         )
     else:
         click.echo(
-            "Reset sent. Give it a couple of seconds, then 'pico-cli detect'\n"
+            "Reset sent. Give it a couple of seconds, then 'wakemypc detect'\n"
             "to confirm it's back."
         )
 
@@ -337,9 +337,9 @@ def upload(port, firmware_dir, no_restart, files):
 
     You can specify individual files or a directory containing .py files:
 
-      pico-cli upload main.py config.py
+      wakemypc upload main.py config.py
 
-      pico-cli upload --firmware-dir ./pico_firmware/
+      wakemypc upload --firmware-dir ./pico_firmware/src/
 
     The files are uploaded to the root of the Pico's filesystem. The Pico
     runs main.py automatically on boot, so make sure that file exists.
@@ -375,7 +375,7 @@ def upload(port, firmware_dir, no_restart, files):
         click.echo(
             "No files specified. Use --firmware-dir or pass file paths.", err=True
         )
-        click.echo("Example: pico-cli upload --firmware-dir ./pico_firmware/")
+        click.echo("Example: wakemypc upload --firmware-dir ./pico_firmware/src/")
         sys.exit(1)
 
     # Show transfer method
@@ -406,20 +406,20 @@ def upload(port, firmware_dir, no_restart, files):
     # Auto-restart on success unless the user opted out. The newly-uploaded
     # files don't take effect until MicroPython re-imports them, which
     # only happens at boot -- so without this step the user has to remember
-    # to follow up with `pico-cli restart`.
+    # to follow up with `wakemypc restart`.
     if not no_restart and is_mpremote_available():
         click.echo("\nRestarting Pico so it picks up the new files...")
         if reset_pico_via_mpremote(port):
             click.echo("Reset signal sent. The Pico should be back online in a few seconds.")
         else:
             click.echo(
-                "Could not soft-reset via mpremote. Run 'pico-cli restart' to "
+                "Could not soft-reset via mpremote. Run 'wakemypc restart' to "
                 "make the Pico re-import the new files.",
                 err=True,
             )
 
     click.echo(
-        "\nNext step: provision with 'pico-cli provision' or register with 'pico-cli register'"
+        "\nNext step: provision with 'wakemypc provision' or register with 'wakemypc register'"
     )
 
 
@@ -456,27 +456,27 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
     Examples:
 
       First-time setup (all fields required):
-        pico-cli provision --server-url https://example.com --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
+        wakemypc provision --server-url https://example.com --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
 
       Update just the server URL (keep existing WiFi):
-        pico-cli provision --server-url https://new-server.com
+        wakemypc provision --server-url https://new-server.com
         
         Add a new WiFi network without removing existing ones:
-        pico-cli provision --add-new-wifi --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
-        pico-cli provision -a --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+        wakemypc provision --add-new-wifi --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+        wakemypc provision -a --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
         (The --order flag is optional but can be used to control the priority of WiFi networks)
 
         Clear all WiFi networks and set a new one:
-        pico-cli provision --clear-wifi --wifi-ssid FreshNetwork --wifi-pass freshpass
-        pico-cli provision -c --wifi-ssid FreshNetwork --wifi-pass freshpass
+        wakemypc provision --clear-wifi --wifi-ssid FreshNetwork --wifi-pass freshpass
+        wakemypc provision -c --wifi-ssid FreshNetwork --wifi-pass freshpass
 
         Clear all WiFi networks without adding a new one:
-        pico-cli provision --clear-wifi
-        pico-cli provision -c
+        wakemypc provision --clear-wifi
+        wakemypc provision -c
 
         Remove a specific WiFi network:
-        pico-cli provision --remove-wifi --wifi-ssid NetworkToRemove
-        pico-cli provision -r --wifi-ssid NetworkToRemove
+        wakemypc provision --remove-wifi --wifi-ssid NetworkToRemove
+        wakemypc provision -r --wifi-ssid NetworkToRemove
 
     Notes: 
      - You can run this command multiple times to update the configuration as needed.
@@ -555,7 +555,7 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
                     display_value = value or "not set"
                 click.echo(f"  {key}: {display_value}")
         click.echo("\nProvisioning complete!")
-        click.echo("Next step: register with 'pico-cli register' to get a device_token")
+        click.echo("Next step: register with 'wakemypc register' to get a device_token")
     except RuntimeError as e:
         click.echo(f"\nError: {e}", err=True)
         sys.exit(1)
@@ -609,13 +609,13 @@ def register(api_url, username, password, port, name, rotate, token):
     Three modes, picked by flags:
 
       Fresh registration (default):
-        pico-cli register --api-url https://example.com --username admin --password pass
+        wakemypc register --api-url https://example.com --username admin --password pass
 
       Rotate an already-registered Pico's token (server invalidates the old one):
-        pico-cli register --api-url https://example.com --username admin --password pass --rotate
+        wakemypc register --api-url https://example.com --username admin --password pass --rotate
 
       Push a token you already have (no server call -- e.g. you rotated via the dashboard):
-        pico-cli register --token <device_token>
+        wakemypc register --token <device_token>
 
     The resulting device_token is always merged into the Pico's secrets.json
     (existing WiFi config and other fields are preserved).
@@ -730,12 +730,12 @@ def logs(port):
     port hostage.
 
     Disconnecting (Ctrl+C) does NOT reset the Pico -- it keeps running
-    normally, you just stop watching. Re-run `pico-cli logs` any time
+    normally, you just stop watching. Re-run `wakemypc logs` any time
     to reattach.
 
     Examples:
-      pico-cli logs                          # auto-detect single Pico
-      pico-cli logs --port /dev/ttyACM1      # specific Pico when several plugged in
+      wakemypc logs                          # auto-detect single Pico
+      wakemypc logs --port /dev/ttyACM1      # specific Pico when several plugged in
     """
     import serial
     from .serial_detect import get_single_pico_port
@@ -795,9 +795,9 @@ def identify(port, duration):
     You can then label the physical device with its port name or device ID.
 
     Example:
-      pico-cli identify                       # auto-detect single Pico
-      pico-cli identify --port /dev/ttyACM0   # identify a specific Pico
-      pico-cli identify --duration 10         # blink for 10 seconds
+      wakemypc identify                       # auto-detect single Pico
+      wakemypc identify --port /dev/ttyACM0   # identify a specific Pico
+      wakemypc identify --duration 10         # blink for 10 seconds
     """
     from .serial_detect import get_single_pico_port
     from .identify import read_device_id_and_blink
@@ -840,8 +840,8 @@ def status(port):
       - Free memory and firmware info
 
     Useful for debugging connection issues. If WiFi shows "not connected",
-    check your WiFi credentials with 'pico-cli provision'. If the server
-    URL is wrong, update it with 'pico-cli provision --server-url ...'.
+    check your WiFi credentials with 'wakemypc provision'. If the server
+    URL is wrong, update it with 'wakemypc provision --server-url ...'.
 
     HOW THIS WORKS UNDER THE HOOD
     ------------------------------
@@ -989,7 +989,7 @@ def status(port):
                     click.echo("  Could not parse secrets.json")
                 break
         else:
-            click.echo("  secrets.json: not found (run pico-cli provision)")
+            click.echo("  secrets.json: not found (run wakemypc provision)")
 
         ser.close()
         click.echo(f"\n{'=' * 40}")
@@ -1004,8 +1004,8 @@ def status(port):
         sys.exit(1)
 
 
-# Entry point: this is what runs when you type 'pico-cli' on the command line.
-# The pyproject.toml maps 'pico-cli' -> 'pico_cli.main:cli', so this function
+# Entry point: this is what runs when you type 'wakemypc' on the command line.
+# The pyproject.toml maps 'wakemypc' -> 'wakemypc.main:cli', so this function
 # is called directly.
 if __name__ == "__main__":
     cli()

@@ -1,126 +1,79 @@
-# pico-cli: Raspberry Pi Pico W 2 Management Tool
+# wakemypc
 
-A command-line tool that runs on your computer to set up and manage Raspberry Pi Pico W 2 transmitter devices. It communicates with Picos over USB serial and with your Django server over HTTP.
+Companion CLI for [wakemypc.com](https://wakemypc.com). Runs on your computer, talks to a Pi Pico W (or W 2) over USB, and your wakemypc.com account over HTTP.
 
-## Prerequisites
+## Install
 
-- Python 3.10 or higher
-- A Raspberry Pi Pico W 2 connected via USB
-- (Optional but recommended) `mpremote` for faster file transfers: `pip install mpremote`
-- On Linux: add your user to the `dialout` group for serial port access:
-  ```
-  sudo usermod -a -G dialout $USER
-  ```
-  Then log out and back in.
-
-## Installation
+Direct from GitHub (recommended for now -- no PyPI release yet):
 
 ```bash
-cd pico_cli
-pip install .
+pip install git+https://github.com/wakemypc/wakemypc-cli.git
 ```
 
-Or for development (editable install):
-```bash
-pip install -e .
-```
-
-## Quick Start: Setting Up a New Pico
-
-### Step 1: Flash MicroPython firmware
-
-Download the MicroPython `.uf2` firmware for the Pico W 2 from https://micropython.org/download/ (look for "RPI_PICO2_W").
-
-Put the Pico in BOOTSEL mode:
-1. Unplug the Pico from USB.
-2. Hold the BOOTSEL button (small white button on the board).
-3. Plug the USB cable back in while holding the button.
-4. Release the button.
-
-Then flash:
-```bash
-pico-cli flash --uf2 RPI_PICO2_W-v1.24.1.uf2
-```
-
-### Step 2: Verify detection
+Verify:
 
 ```bash
-pico-cli detect
+wakemypc --help
 ```
 
-You should see your Pico listed with its serial port (e.g., `/dev/ttyACM0`).
-
-### Step 3: Upload application firmware
+On Linux you may need to add yourself to the `dialout` group so you can talk to the Pico's serial port without `sudo`:
 
 ```bash
-pico-cli upload --firmware-dir ./pico_firmware/
+sudo usermod -a -G dialout $USER
+# log out and back in
 ```
 
-Or upload specific files:
+## What it does
+
+```
+wakemypc detect           # list connected Picos (flashed and BOOTSEL-mode)
+wakemypc flash --uf2 …    # write MicroPython firmware to a BOOTSEL Pico
+wakemypc upload …         # copy wakemypc-firmware .py files onto the Pico
+wakemypc provision …      # write WiFi creds + server URL to secrets.json
+wakemypc register …       # register with the server, get a device token
+wakemypc restart          # soft-reboot the Pico (or reboot into BOOTSEL)
+wakemypc identify         # blink the Pico's LED to find it physically
+wakemypc status           # read WiFi state + secrets summary over USB
+```
+
+`wakemypc --help` and `wakemypc <subcommand> --help` have the full reference. The most common flow for a brand new Pico is:
+
 ```bash
-pico-cli upload main.py boot.py lib/sensors.py
+# 1) Plug Pico in BOOTSEL mode (hold BOOTSEL while connecting USB).
+wakemypc detect
+wakemypc flash --uf2 RPI_PICO2_W-…uf2
+
+# 2) Plug the now-flashed Pico in normally.
+wakemypc upload --firmware-dir ./wakemypc-firmware/src/
+
+# 3) Configure WiFi + server.
+wakemypc provision --server-url https://wakemypc.com --add-new-wifi --wifi-ssid HomeWiFi --wifi-pass mypassword
+
+# 4) Register on wakemypc.com.
+wakemypc register --api-url https://wakemypc.com --username you@example.com
+# (prompts for password; saves the resulting device token to the Pico)
 ```
 
-### Step 4: Provision WiFi and server config
+## Token rotation
+
+Three modes:
 
 ```bash
-pico-cli provision \
-    --server-url https://your-server.com \
-    --wifi-ssid "YourNetwork" \
-    --wifi-pass "YourPassword"
+wakemypc register --api-url https://wakemypc.com --username … --password …            # fresh
+wakemypc register --api-url https://wakemypc.com --username … --password … --rotate   # rotate existing
+wakemypc register --token <T>                                                          # offline, no server call
 ```
 
-### Step 5: Register on the server
+`--rotate` calls the server's rotate-token endpoint and writes the new token to the Pico in one step. `--token <T>` skips the server -- handy when you've already rotated through the dashboard and just need to push the new token over USB.
 
-```bash
-pico-cli register \
-    --api-url https://your-server.com \
-    --username your_username \
-    --password your_password \
-    --name "Living Room Sensor"
-```
+## What this CLI does NOT do
 
-Save the device token that is displayed. It is shown only once.
+- It does not need root / sudo (apart from the one-time `dialout` group add on Linux).
+- It does not phone home. The only network calls go to the `--api-url` you pass to `register`.
+- It does not store your password. Login uses the JWT the server returns; the password is forwarded once and then forgotten.
 
-### Step 6: Identify (optional)
+## License
 
-If you have multiple Picos, blink the LED to identify which is which:
-```bash
-pico-cli identify --port /dev/ttyACM0
-```
+**Source-available, non-commercial.** [PolyForm Noncommercial 1.0.0](LICENSE).
 
-## All Commands
-
-| Command     | Description                                          |
-|-------------|------------------------------------------------------|
-| `detect`    | List connected Pico devices                          |
-| `flash`     | Flash MicroPython firmware (.uf2) in BOOTSEL mode    |
-| `upload`    | Upload .py files to the Pico's filesystem            |
-| `provision` | Write WiFi and server config to secrets.json         |
-| `register`  | Register the Pico on the Django server, get token    |
-| `identify`  | Blink the LED for physical identification            |
-
-Use `pico-cli <command> --help` for detailed options on each command.
-
-## Troubleshooting
-
-**"No Pico devices found"**
-- Is the Pico plugged in via USB?
-- Does it have MicroPython installed? Use `pico-cli flash` first.
-- Is it in BOOTSEL mode? BOOTSEL shows as a USB drive, not a serial port.
-- On Linux: `sudo usermod -a -G dialout $USER` and re-login.
-- Try a different USB cable. Some cables are charge-only (no data).
-
-**"Permission denied" on serial port**
-- Linux: `sudo usermod -a -G dialout $USER` then log out and back in.
-- macOS: Should work out of the box.
-- Windows: Install the Raspberry Pi Pico driver if needed.
-
-**"mpremote not found"**
-- Install it: `pip install mpremote`
-- The tool works without mpremote (uses serial fallback) but mpremote is faster.
-
-**"Could not connect to server"**
-- Check the URL (include https:// or http://).
-- Make sure the Django server is running.
-- Check your firewall and network connectivity.
+You can run it, audit it, modify it, and share patches. You can't sell it or run a paid service on top of it. Patches welcome.

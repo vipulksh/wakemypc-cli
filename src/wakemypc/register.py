@@ -307,7 +307,7 @@ def register_and_provision(
     """
     Complete registration flow: login, read device ID, register, write token.
 
-    This is the high-level function called by 'pico-cli register'. It ties
+    This is the high-level function called by 'wakemypc register'. It ties
     together the entire registration process:
 
       1. Log into the server to get a JWT.

@@ -247,7 +247,7 @@ def provision_pico(
     """
     High-level provisioning function: write configuration to a Pico.
 
-    This is the main entry point for the 'pico-cli provision' command.
+    This is the main entry point for the 'wakemypc provision' command.
 
     Parameters:
         port:            Serial port path
