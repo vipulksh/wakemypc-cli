@@ -324,8 +324,14 @@ def restart(port, bootloader):
     default=None,
     help="Directory containing .py files to upload to the Pico.",
 )
+@click.option(
+    "--no-restart",
+    is_flag=True,
+    default=False,
+    help="Don't soft-reset the Pico after a successful upload. By default, upload reboots the Pico so it re-imports the newly-uploaded modules.",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def upload(port, firmware_dir, files):
+def upload(port, firmware_dir, no_restart, files):
     """
     Upload Python files to the Pico's filesystem.
 
@@ -338,11 +344,15 @@ def upload(port, firmware_dir, files):
     The files are uploaded to the root of the Pico's filesystem. The Pico
     runs main.py automatically on boot, so make sure that file exists.
 
+    By default the Pico is soft-reset after a successful upload so it
+    immediately re-imports the new modules. Pass --no-restart to skip
+    the reboot (e.g. when staging a multi-step deploy).
+
     Uses mpremote if installed (recommended: pip install mpremote), otherwise
     falls back to slower serial REPL transfer.
     """
     from .serial_detect import get_single_pico_port
-    from .upload import upload_files, is_mpremote_available
+    from .upload import upload_files, is_mpremote_available, reset_pico_via_mpremote
 
     # Resolve the port
     try:
@@ -392,10 +402,25 @@ def upload(port, firmware_dir, files):
 
     if fail_count > 0:
         sys.exit(1)
-    else:
-        click.echo(
-            "\nNext step: provision with 'pico-cli provision' or register with 'pico-cli register'"
-        )
+
+    # Auto-restart on success unless the user opted out. The newly-uploaded
+    # files don't take effect until MicroPython re-imports them, which
+    # only happens at boot -- so without this step the user has to remember
+    # to follow up with `pico-cli restart`.
+    if not no_restart and is_mpremote_available():
+        click.echo("\nRestarting Pico so it picks up the new files...")
+        if reset_pico_via_mpremote(port):
+            click.echo("Reset signal sent. The Pico should be back online in a few seconds.")
+        else:
+            click.echo(
+                "Could not soft-reset via mpremote. Run 'pico-cli restart' to "
+                "make the Pico re-import the new files.",
+                err=True,
+            )
+
+    click.echo(
+        "\nNext step: provision with 'pico-cli provision' or register with 'pico-cli register'"
+    )
 
 
 # ---------------------------------------------------------------------------

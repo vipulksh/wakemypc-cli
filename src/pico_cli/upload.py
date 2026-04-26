@@ -69,6 +69,68 @@ def is_mpremote_available():
     return shutil.which("mpremote") is not None
 
 
+def _quiesce_pico(port, baudrate=115200):
+    """
+    Best-effort: send Ctrl+C twice over the serial port so any running
+    main.py is interrupted before mpremote tries to enter raw REPL.
+
+    Why: mpremote's raw-REPL handshake has a tight timeout. If the Pico's
+    main loop is in the middle of a small blocking call (e.g. ws.recv()
+    with a 100ms timeout), the Ctrl+C arrives but the handshake has
+    already given up. The user observes "first upload fails, retry
+    succeeds" -- the retry succeeds because the Pico is now interrupted
+    from the first attempt's Ctrl+C and is sitting at the REPL.
+
+    By pre-interrupting once before any mpremote cp, we put the Pico
+    into a known good state. If we can't open the port (Pico is in
+    BOOTSEL, somebody else has it open, etc.) we silently bail; the
+    per-file retry is the safety net.
+    """
+    try:
+        with serial.Serial(port, baudrate, timeout=1) as ser:
+            time.sleep(0.1)
+            ser.write(b"\r\x03\x03")
+            time.sleep(0.4)
+            # Drain any prompt / banner the REPL just emitted.
+            try:
+                ser.read(ser.in_waiting or 0)
+            except Exception:
+                pass
+    except Exception:
+        # Non-fatal -- the upload's per-file retry will catch the race
+        # if pre-quiesce didn't take.
+        pass
+
+
+def _run_cp_with_retry(cmd, attempts=2, retry_delay=1.0, timeout=30):
+    """
+    Run an `mpremote cp` invocation with one retry on failure.
+
+    Returns the final CompletedProcess on success, or the last failure
+    object (CompletedProcess with non-zero rc, or TimeoutExpired) so the
+    caller can extract a sensible error message either way.
+
+    The retry is intentionally short (1s default) -- long enough for the
+    Pico to settle after a watchdog reboot or a transient serial blip,
+    short enough that a uniformly-broken Pico reports an error fast
+    instead of stalling for minutes.
+    """
+    last = None
+    for attempt in range(attempts):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout
+            )
+            if result.returncode == 0:
+                return result
+            last = result
+        except subprocess.TimeoutExpired as exc:
+            last = exc
+        if attempt < attempts - 1:
+            time.sleep(retry_delay)
+    return last
+
+
 def upload_via_mpremote(port, local_files, remote_dir="/"):
     """
     Upload files to the Pico using mpremote (the preferred method).
@@ -82,8 +144,19 @@ def upload_via_mpremote(port, local_files, remote_dir="/"):
         mpremote connects to the Pico's serial port, enters raw REPL mode
         (a machine-friendly protocol), and transfers the file contents.
         It is much more reliable than manually sending data over the REPL.
+
+    Robustness:
+        Before the first cp we pre-interrupt main.py via a direct serial
+        Ctrl+C twice (see _quiesce_pico). Each cp also retries once on
+        failure (see _run_cp_with_retry). Either layer alone is enough
+        in the common case; together they handle the watchdog-reboot-
+        between-files edge case too.
     """
     results = []
+
+    # Interrupt main.py once up front so subsequent raw-REPL handshakes
+    # are fast. Skipped silently if the port can't be opened.
+    _quiesce_pico(port)
 
     for local_path in local_files:
         local_path = Path(local_path)
@@ -104,37 +177,9 @@ def upload_via_mpremote(port, local_files, remote_dir="/"):
         cmd = ["mpremote", "connect", port, "cp", str(local_path), remote_path]
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                results.append(
-                    {
-                        "file": str(local_path),
-                        "remote": remote_path.lstrip(":"),
-                        "success": True,
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "file": str(local_path),
-                        "success": False,
-                        "error": result.stderr.strip() or "Unknown error",
-                    }
-                )
-        except subprocess.TimeoutExpired:
-            results.append(
-                {
-                    "file": str(local_path),
-                    "success": False,
-                    "error": "Upload timed out after 30 seconds",
-                }
-            )
+            result = _run_cp_with_retry(cmd)
         except FileNotFoundError:
+            # mpremote isn't installed at all -- short-circuit the rest.
             results.append(
                 {
                     "file": str(local_path),
@@ -142,8 +187,56 @@ def upload_via_mpremote(port, local_files, remote_dir="/"):
                     "error": "mpremote not found. Install it with: pip install mpremote",
                 }
             )
+            continue
+
+        if isinstance(result, subprocess.TimeoutExpired):
+            results.append(
+                {
+                    "file": str(local_path),
+                    "success": False,
+                    "error": "Upload timed out after 30 seconds (retried once)",
+                }
+            )
+        elif result.returncode == 0:
+            results.append(
+                {
+                    "file": str(local_path),
+                    "remote": remote_path.lstrip(":"),
+                    "success": True,
+                }
+            )
+        else:
+            results.append(
+                {
+                    "file": str(local_path),
+                    "success": False,
+                    "error": result.stderr.strip() or "Unknown error",
+                }
+            )
 
     return results
+
+
+def reset_pico_via_mpremote(port):
+    """
+    Soft-reset the Pico via mpremote so it re-imports any newly-uploaded
+    modules. Returns True on success, False otherwise.
+
+    Used by the upload command's auto-restart path. Soft reset is enough
+    here -- MicroPython picks up the new files on re-import without a
+    full power cycle. mpremote's `reset` subcommand handles the serial
+    handshake and exits cleanly.
+    """
+    try:
+        result = subprocess.run(
+            ["mpremote", "connect", port, "reset"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def upload_via_serial_repl(port, local_files, remote_dir="/", baudrate=115200):
