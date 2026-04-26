@@ -869,14 +869,16 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
             deadline = time.time() + reconnect_grace
             while time.time() < deadline:
                 if os.path.exists(port):
-                    # 3s settling delay: USB CDC re-enumerates within ~200ms
+                    # 0.2s settling delay: USB CDC re-enumerates within ~200ms
                     # of machine.reset(), but MicroPython needs another
                     # ~1-2s to load boot.py + main.py. Opening the port
                     # too early -- even with dtr/rts low -- has been seen
                     # to leave the firmware in a half-booted state. The
                     # generous wait removes the race entirely; old behavior
                     # was 500ms which was on the ragged edge.
-                    time.sleep(3.0)
+                    # 0.2 Works well in testing and didn't any issues
+                    # so keeping it as 0.2s for now instead of 3 secs.
+                    time.sleep(0.2)
                     click.echo(
                         "[logs] port reappeared, resuming live stream.",
                         err=True,
