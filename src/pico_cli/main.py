@@ -234,6 +234,80 @@ def flash(uf2):
 
 
 # ---------------------------------------------------------------------------
+# RESTART -- Soft-reboot a connected Pico
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--port",
+    default=None,
+    help="Serial port of the Pico (e.g. /dev/ttyACM0). Auto-detected if not specified.",
+)
+@click.option(
+    "--bootloader",
+    is_flag=True,
+    default=False,
+    help="Reboot into BOOTSEL / mass-storage mode instead of normal MicroPython. Useful for reflashing without holding the BOOTSEL button.",
+)
+def restart(port, bootloader):
+    """
+    Reboot a connected Pico without unplugging it.
+
+    Sends 'machine.reset()' to the Pico's MicroPython REPL. The Pico drops
+    USB, restarts, and re-runs boot.py + main.py. Use --bootloader to
+    reboot straight into BOOTSEL mode (useful for re-flashing firmware).
+
+    Examples:
+      pico-cli restart                     # soft reset
+      pico-cli restart --bootloader        # reboot into flashable BOOTSEL
+      pico-cli restart --port /dev/ttyACM1 # specific Pico when several plugged in
+    """
+    from .restart import restart_pico
+    from .serial_detect import get_single_pico_port
+
+    try:
+        target_port = get_single_pico_port(preferred_port=port)
+    except RuntimeError as exc:
+        # Friendly hint when the Pico is in BOOTSEL: there's nothing to
+        # restart, just unplug-replug or eject the drive.
+        click.echo(str(exc), err=True)
+        try:
+            from .flash import find_bootsel_drive
+
+            mount = find_bootsel_drive()
+        except Exception:
+            mount = None
+        if mount:
+            click.echo(
+                f"\nA Pico in BOOTSEL mode is mounted at {mount}.\n"
+                "BOOTSEL has no REPL to reset -- unplug and replug the USB cable\n"
+                "(or eject the drive) to boot it back into MicroPython.",
+                err=True,
+            )
+        sys.exit(1)
+
+    mode = "BOOTSEL (flash mode)" if bootloader else "normal mode"
+    click.echo(f"Restarting Pico on {target_port} into {mode}...")
+    try:
+        restart_pico(target_port, into_bootloader=bootloader)
+    except Exception as exc:
+        click.echo(f"\nFailed to send reset command: {exc}", err=True)
+        sys.exit(1)
+
+    if bootloader:
+        click.echo(
+            "Reset sent. The Pico should appear shortly as a USB drive\n"
+            "(RPI-RP2 / RP2350). Run 'pico-cli detect' to confirm."
+        )
+    else:
+        click.echo(
+            "Reset sent. Give it a couple of seconds, then 'pico-cli detect'\n"
+            "to confirm it's back."
+        )
+
+
+# ---------------------------------------------------------------------------
 # UPLOAD -- Upload .py files to the Pico's filesystem
 # ---------------------------------------------------------------------------
 
