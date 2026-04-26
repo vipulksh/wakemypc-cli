@@ -208,7 +208,102 @@ def register_device(api_url, access_token, device_id, device_name=None):
         )
 
 
-def register_and_provision(api_url, username, password, port, device_name=None):
+def find_pico_by_unique_id(api_url, access_token, unique_id):
+    """
+    Look up an already-registered Pico by its hardware unique_id and
+    return the public_id the server assigned it.
+
+    The rotate-token endpoint is keyed on public_id (the short hash that
+    appears in URLs), but the only ID the Pico knows about itself is the
+    hardware unique_id. We bridge the two by listing the user's Picos
+    and matching by unique_id. The user only sees their own + shared
+    Picos in this list, so this also doubles as an "ownership" check --
+    if no match is found, either the Pico isn't registered to this user
+    or hasn't been registered at all, and the caller should fall back
+    to a fresh register.
+
+    Returns the public_id string, or None if not found.
+    """
+    api_url = api_url.rstrip("/")
+    list_url = f"{api_url}/api/power/pico-devices/"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        response = requests.get(list_url, headers=headers, timeout=15)
+    except requests.ConnectionError:
+        raise RuntimeError(f"Could not connect to {list_url}")
+    except requests.Timeout:
+        raise RuntimeError(f"Request to {list_url} timed out")
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to list Picos (status {response.status_code}).\n"
+            f"Response: {response.text[:500]}"
+        )
+
+    # The list endpoint returns either a paginated envelope or a plain
+    # list depending on how DRF is configured. Handle both.
+    data = response.json()
+    picos = data.get("results", data) if isinstance(data, dict) else data
+    for p in picos or []:
+        if p.get("unique_id") == unique_id:
+            return p.get("public_id")
+    return None
+
+
+def rotate_token_for_pico(api_url, access_token, public_id):
+    """
+    Hit the server's rotate-token action for an already-registered Pico.
+
+    The server invalidates the old encrypted token and returns a fresh
+    raw token. This is the same endpoint the dashboard's "Rotate Token"
+    button uses; we exposed it on the CLI so a user with USB access can
+    rotate + reprovision in one step without bouncing through the web UI.
+
+    Returns the new raw token string.
+    """
+    api_url = api_url.rstrip("/")
+    rotate_url = f"{api_url}/api/power/pico-devices/{public_id}/rotate-token/"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        response = requests.post(rotate_url, headers=headers, timeout=15)
+    except requests.ConnectionError:
+        raise RuntimeError(f"Could not connect to {rotate_url}")
+    except requests.Timeout:
+        raise RuntimeError(f"Request to {rotate_url} timed out")
+
+    if response.status_code in (200, 201):
+        data = response.json()
+        token = data.get("device_token")
+        if not token:
+            raise RuntimeError(
+                "rotate-token returned no device_token. Server response:\n"
+                f"{response.text[:500]}"
+            )
+        return token
+
+    if response.status_code == 403:
+        raise RuntimeError(
+            "Cannot rotate this Pico's token: only the owner can do that.\n"
+            "If this is your Pico, log in with the owner's credentials."
+        )
+
+    raise RuntimeError(
+        f"Token rotation failed with status {response.status_code}.\n"
+        f"Response: {response.text[:500]}"
+    )
+
+
+def register_and_provision(
+    api_url,
+    username,
+    password,
+    port,
+    device_name=None,
+    rotate=False,
+    manual_token=None,
+):
     """
     Complete registration flow: login, read device ID, register, write token.
 
@@ -217,15 +312,23 @@ def register_and_provision(api_url, username, password, port, device_name=None):
 
       1. Log into the server to get a JWT.
       2. Read the Pico's hardware ID via serial.
-      3. Register the device on the server.
-      4. Write the device_token back to the Pico's secrets.json.
+      3. Either:
+           - rotate=True   -> rotate the existing Pico's token on the server
+           - manual_token  -> skip the server entirely; trust the caller's token
+           - default       -> register the Pico fresh on the server
+      4. Write the resulting device_token back to the Pico's secrets.json.
 
     Parameters:
-        api_url:     Base URL of the website (e.g. https://example.com)
-        username:    Your username
-        password:    Your password
-        port:        Serial port of the Pico
-        device_name: Optional human-friendly name
+        api_url:      Base URL of the website (e.g. https://example.com)
+        username:     Your username (ignored when manual_token is given)
+        password:     Your password (ignored when manual_token is given)
+        port:         Serial port of the Pico
+        device_name:  Optional human-friendly name (ignored on rotate)
+        rotate:       If True, rotate an already-registered Pico's token
+                      (server invalidates the old token, returns a new one).
+        manual_token: If set, skip all server calls and just write this
+                      token to the Pico. Use when you've already obtained
+                      a token via the dashboard's rotate flow.
 
     Returns:
         A dict with registration details.
@@ -233,15 +336,42 @@ def register_and_provision(api_url, username, password, port, device_name=None):
     # Import here to avoid circular imports
     from .provision import read_device_id, read_current_secrets, write_secrets
 
-    # Step 1: Authenticate with the server
-    access_token = login_to_server(api_url, username, password)
-
-    # Step 2: Read the Pico's unique hardware ID
+    # Step 2 always runs -- we need the hardware ID either to register a
+    # new device or to look up an existing one for rotation, and we need
+    # it as device_id when writing secrets.json.
     device_id = read_device_id(port)
 
-    # Step 3: Register on the server
-    result = register_device(api_url, access_token, device_id, device_name)
-    device_token = result["device_token"]
+    if manual_token:
+        # Offline path: don't touch the server. Useful when the user
+        # rotated via the dashboard and just wants to push the resulting
+        # token to the Pico over USB.
+        device_token = manual_token
+        action_summary = "Token written from --token argument (no server call)."
+    else:
+        access_token = login_to_server(api_url, username, password)
+
+        if rotate:
+            public_id = find_pico_by_unique_id(api_url, access_token, device_id)
+            if not public_id:
+                raise RuntimeError(
+                    f"No Pico with unique_id={device_id[:16]}... is registered\n"
+                    "to your account. Run without --rotate to register fresh."
+                )
+            device_token = rotate_token_for_pico(api_url, access_token, public_id)
+            action_summary = (
+                "Token rotated. The previous token is now invalid -- any other\n"
+                "device or process using it will need to be re-provisioned."
+            )
+        else:
+            result = register_device(api_url, access_token, device_id, device_name)
+            device_token = result["device_token"]
+            action_summary = (
+                "Device registered successfully!\n"
+                "\n"
+                "IMPORTANT: Save the device_token shown above. It is displayed\n"
+                "only once. It has also been written to the Pico's secrets.json.\n"
+                "If you lose it, you will need to regenerate it on the server."
+            )
 
     # Step 4: Write the token back to the Pico's secrets.json.
     # We merge with existing secrets so we do not overwrite WiFi config, etc.
@@ -261,11 +391,5 @@ def register_and_provision(api_url, username, password, port, device_name=None):
         "device_id": device_id,
         "device_token": device_token,
         "port": port,
-        "message": (
-            "Device registered successfully!\n"
-            "\n"
-            "IMPORTANT: Save the device_token shown above. It is displayed\n"
-            "only once. It has also been written to the Pico's secrets.json.\n"
-            "If you lose it, you will need to regenerate it on the server."
-        ),
+        "message": action_summary,
     }
