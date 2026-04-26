@@ -743,21 +743,7 @@ def register(api_url, username, password, port, name, rotate, token):
         "(errors, connections, WoL, auth, OTA) are shown."
     ),
 )
-@click.option(
-    "--catch-up",
-    "catch_up",
-    is_flag=True,
-    default=False,
-    help=(
-        "Before live streaming starts, snapshot the Pico's in-RAM log "
-        "buffer (last ~200 lines) so you can see what happened before "
-        "this CLI attached. Briefly interrupts main.py via mpremote, "
-        "prints the recovered lines with relative timestamps, then "
-        "soft-resets to resume. Adds ~3s to startup. Requires firmware "
-        "v0.2.0+ (log_buffer module). Default: skipped."
-    ),
-)
-def logs(port, debug, catch_up):
+def logs(port, debug):
     """
     Stream the Pico's serial console to your terminal, with reboot recovery.
 
@@ -769,8 +755,15 @@ def logs(port, debug, catch_up):
     Examples:
       wakemypc logs                   # significant events only
       wakemypc logs --debug           # full firehose
-      wakemypc logs --catch-up        # show the last 200 lines of pre-attach output
       wakemypc logs --port /dev/ttyACM1
+
+    Note: the previous --catch-up flag (which attempted to recover the
+    Pico's in-RAM log_buffer via mpremote and a Ctrl+D soft-reset) has
+    been removed. It interrupted main.py during the post-OTA boot
+    window, landing the firmware in REPL with no WiFi -- exactly the
+    "stuck after OTA" bug it was meant to help diagnose. Boot logs that
+    print before this command attaches are simply lost; that's the
+    correct trade-off.
     """
     from .serial_detect import get_single_pico_port
 
@@ -785,14 +778,6 @@ def logs(port, debug, catch_up):
         f"Reading logs from {port} [{mode}] -- Ctrl+C to stop\n",
         err=True,
     )
-
-    if catch_up:
-        click.echo(
-            "[logs] catch-up: dumping in-RAM log buffer before streaming...",
-            err=True,
-        )
-        _recover_log_buffer_after_reconnect(port, debug=debug)
-        click.echo("[logs] catch-up done; starting live stream.", err=True)
 
     try:
         _stream_serial_with_reconnect(port, debug=debug)
@@ -837,7 +822,15 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
     while True:
         leftover = ""
         try:
-            with serial.Serial(port, 115200, timeout=0.5) as ser:
+            # dtr=False, rts=False: pyserial asserts both lines on open by
+            # default. On the rp2 USB CDC stack, that pulse can interrupt
+            # MicroPython startup before main.py runs, leaving the firmware
+            # parked in REPL with no WiFi -- which is exactly the post-OTA
+            # bug we hunted through firmware v0.3.2-v0.3.4 before realising
+            # it was a host-side issue. Hold the lines low on every open.
+            with serial.Serial(
+                port, 115200, timeout=0.5, dtr=False, rts=False
+            ) as ser:
                 while True:
                     data = ser.read(ser.in_waiting or 1)
                     if not data:
@@ -858,13 +851,18 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
             deadline = time.time() + reconnect_grace
             while time.time() < deadline:
                 if os.path.exists(port):
-                    time.sleep(0.5)
+                    # 3s settling delay: USB CDC re-enumerates within ~200ms
+                    # of machine.reset(), but MicroPython needs another
+                    # ~1-2s to load boot.py + main.py. Opening the port
+                    # too early -- even with dtr/rts low -- has been seen
+                    # to leave the firmware in a half-booted state. The
+                    # generous wait removes the race entirely; old behavior
+                    # was 500ms which was on the ragged edge.
+                    time.sleep(3.0)
                     click.echo(
-                        "[logs] port reappeared; recovering boot logs...",
+                        "[logs] port reappeared, resuming live stream.",
                         err=True,
                     )
-                    _recover_log_buffer_after_reconnect(port, debug=debug)
-                    click.echo("[logs] resuming live stream.", err=True)
                     break
                 time.sleep(0.5)
             else:
@@ -874,97 +872,6 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
                     err=True,
                 )
                 sys.exit(1)
-
-
-def _recover_log_buffer_after_reconnect(port, debug=False):
-    """When the Pico reboots (hardware reset, watchdog), USB CDC drops
-    and reappears. By the time the host reattaches, the boot sequence
-    has already printed -- those bytes are lost in transit because the
-    host wasn't reading. The firmware's log_buffer captures those prints
-    in RAM, so we briefly interrupt main.py via mpremote, dump the
-    buffer, then send Ctrl+D over serial to soft-reset and resume
-    main.py. Ctrl+D doesn't drop USB CDC, so the live stream picks up
-    again without another reconnect cycle (just a quick second boot).
-
-    Side effect: the user sees the boot sequence twice on each
-    reconnect -- once via the recovered buffer, once live from the
-    soft-reset that resumes main.py. That's the price of getting the
-    real boot output without bridging mpremote into the live stream.
-    Best-effort: every step is wrapped so a failure here doesn't kill
-    the live-stream loop.
-    """
-    import json
-    import subprocess
-    import time as _time
-
-    import serial as _serial
-
-    exec_script = (
-        "try:\n"
-        "    from log_buffer import get_dump\n"
-        "    import json as _json\n"
-        "    print('__BUF_BEGIN__')\n"
-        "    print(_json.dumps(get_dump()))\n"
-        "    print('__BUF_END__')\n"
-        "except ImportError:\n"
-        "    print('__NO_LOG_BUFFER__')\n"
-    )
-    try:
-        result = subprocess.run(
-            ["mpremote", "connect", port, "exec", exec_script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except FileNotFoundError:
-        click.echo(
-            "[logs] mpremote not installed -- skipping buffer recovery. "
-            "Install with: pip install mpremote",
-            err=True,
-        )
-        return
-    except subprocess.TimeoutExpired:
-        click.echo("[logs] mpremote timed out -- skipping buffer recovery.", err=True)
-        return
-    except Exception as exc:
-        click.echo(f"[logs] buffer recovery failed: {exc}", err=True)
-        return
-
-    out = result.stdout or ""
-    if "__NO_LOG_BUFFER__" in out:
-        click.echo(
-            "[logs] firmware lacks log_buffer (older than v0.2.0) -- "
-            "skipping buffer recovery.",
-            err=True,
-        )
-    elif "__BUF_BEGIN__" in out:
-        payload = out.split("__BUF_BEGIN__", 1)[1].split("__BUF_END__", 1)[0]
-        try:
-            entries = json.loads(payload.strip())
-            click.echo(
-                f"[logs] --- recovered {len(entries)} buffered line(s) ---",
-                err=True,
-            )
-            for entry in entries:
-                line = f"[t={entry.get('t', 0)}ms] {entry.get('msg', '')}"
-                if _line_should_show(line, debug):
-                    sys.stdout.write(line + "\n")
-            click.echo("[logs] --- end recovered ---", err=True)
-            sys.stdout.flush()
-        except json.JSONDecodeError:
-            click.echo(
-                "[logs] couldn't parse log buffer dump (corrupted output).",
-                err=True,
-            )
-
-    # Soft-reset over serial: Ctrl+D from REPL re-runs main.py without
-    # dropping USB CDC, so the live stream picks up the second boot.
-    try:
-        with _serial.Serial(port, 115200, timeout=1) as ser:
-            ser.write(b"\x04")
-            _time.sleep(0.3)
-    except Exception as exc:
-        click.echo(f"[logs] couldn't send Ctrl+D to resume main.py: {exc}", err=True)
 
 
 # ---------------------------------------------------------------------------
