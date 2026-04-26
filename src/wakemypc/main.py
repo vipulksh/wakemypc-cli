@@ -743,7 +743,21 @@ def register(api_url, username, password, port, name, rotate, token):
         "(errors, connections, WoL, auth, OTA) are shown."
     ),
 )
-def logs(port, debug):
+@click.option(
+    "--catch-up",
+    "catch_up",
+    is_flag=True,
+    default=False,
+    help=(
+        "Before live streaming starts, snapshot the Pico's in-RAM log "
+        "buffer (last ~200 lines) so you can see what happened before "
+        "this CLI attached. Briefly interrupts main.py via mpremote, "
+        "prints the recovered lines with relative timestamps, then "
+        "soft-resets to resume. Adds ~3s to startup. Requires firmware "
+        "v0.2.0+ (log_buffer module). Default: skipped."
+    ),
+)
+def logs(port, debug, catch_up):
     """
     Stream the Pico's serial console to your terminal, with reboot recovery.
 
@@ -755,6 +769,7 @@ def logs(port, debug):
     Examples:
       wakemypc logs                   # significant events only
       wakemypc logs --debug           # full firehose
+      wakemypc logs --catch-up        # show the last 200 lines of pre-attach output
       wakemypc logs --port /dev/ttyACM1
     """
     from .serial_detect import get_single_pico_port
@@ -770,6 +785,14 @@ def logs(port, debug):
         f"Reading logs from {port} [{mode}] -- Ctrl+C to stop\n",
         err=True,
     )
+
+    if catch_up:
+        click.echo(
+            "[logs] catch-up: dumping in-RAM log buffer before streaming...",
+            err=True,
+        )
+        _recover_log_buffer_after_reconnect(port, debug=debug)
+        click.echo("[logs] catch-up done; starting live stream.", err=True)
 
     try:
         _stream_serial_with_reconnect(port, debug=debug)
