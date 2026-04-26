@@ -367,7 +367,23 @@ def upload(port, firmware_dir, no_restart, files):
         firmware_path = Path(firmware_dir)
         py_files = sorted(firmware_path.glob("*.py"))
         if not py_files:
-            click.echo(f"No .py files found in {firmware_dir}", err=True)
+            # Try the src/ subdirectory automatically so both
+            #   wakemypc upload --firmware-dir ./pico_firmware/
+            #   wakemypc upload --firmware-dir ./pico_firmware/src/
+            # work without the user knowing the internal layout.
+            src_path = firmware_path / "src"
+            if src_path.is_dir():
+                py_files = sorted(src_path.glob("*.py"))
+                if py_files:
+                    click.echo(
+                        f"No .py files in {firmware_dir}, using {src_path}/",
+                        err=True,
+                    )
+        if not py_files:
+            click.echo(
+                f"No .py files found in {firmware_dir} or {firmware_dir}/src/",
+                err=True,
+            )
             sys.exit(1)
         file_list.extend(str(f) for f in py_files)
 
@@ -716,28 +732,31 @@ def register(api_url, username, password, port, name, rotate, token):
     default=None,
     help="Serial port of the Pico (e.g. /dev/ttyACM0). Auto-detected if not specified.",
 )
-def logs(port):
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help=(
+        "Show all firmware output including high-frequency lines "
+        "(heartbeat metrics, per-probe timing, per-message dispatch). "
+        "Without this flag those are hidden and only significant events "
+        "(errors, connections, WoL, auth, OTA) are shown."
+    ),
+)
+def logs(port, debug):
     """
-    Stream the Pico's serial console to your terminal.
+    Stream the Pico's serial console to your terminal, with reboot recovery.
 
-    The Pico prints boot info, dispatch traces, and errors over USB
-    serial. This subcommand opens the port and pipes everything to
-    stdout in real time, like:
+    If the Pico reboots (OTA, watchdog, USB blip), the CLI waits up to
+    10 seconds for the port to reappear and resumes automatically.
 
-        screen /dev/ttyACM0 115200
-
-    ...but without the modal escape sequences and without taking the
-    port hostage.
-
-    Disconnecting (Ctrl+C) does NOT reset the Pico -- it keeps running
-    normally, you just stop watching. Re-run `wakemypc logs` any time
-    to reattach.
+    Ctrl+C stops the stream without resetting the Pico.
 
     Examples:
-      wakemypc logs                          # auto-detect single Pico
-      wakemypc logs --port /dev/ttyACM1      # specific Pico when several plugged in
+      wakemypc logs                   # significant events only
+      wakemypc logs --debug           # full firehose
+      wakemypc logs --port /dev/ttyACM1
     """
-    import serial
     from .serial_detect import get_single_pico_port
 
     try:
@@ -746,30 +765,82 @@ def logs(port):
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    click.echo(f"Reading logs from {port} -- Ctrl+C to stop\n", err=True)
+    mode = "all output" if debug else "significant events (--debug for full output)"
+    click.echo(
+        f"Reading logs from {port} [{mode}] -- Ctrl+C to stop\n",
+        err=True,
+    )
 
     try:
-        # 115200 is MicroPython's default REPL baudrate. timeout=0.5
-        # makes ser.read() return promptly even when there's nothing
-        # buffered, so Ctrl+C is responsive.
-        with serial.Serial(port, 115200, timeout=0.5) as ser:
-            while True:
-                # Read whatever's already buffered, fall back to a single
-                # byte so the loop doesn't spin when the port is idle.
-                data = ser.read(ser.in_waiting or 1)
-                if data:
-                    sys.stdout.write(data.decode(errors="replace"))
-                    sys.stdout.flush()
+        _stream_serial_with_reconnect(port, debug=debug)
     except KeyboardInterrupt:
         click.echo("\nDisconnected.", err=True)
-    except serial.SerialException as e:
-        click.echo(f"\nSerial error: {e}", err=True)
-        click.echo(
-            "Make sure no other tool (Thonny, screen, mpremote repl) "
-            "has the port open.",
-            err=True,
-        )
-        sys.exit(1)
+
+
+# Lines filtered out in normal mode. Each is a substring match so a
+# single pattern covers the whole class of message.
+_VERBOSE_PATTERNS = (
+    "[proto] Handling:",       # fires on every inbound WS message
+    "[proto] Registered",      # boot-time handler registration (one-shot but noisy)
+    "[ws] Sent:",              # fires on every outbound WS message
+    "[scanner] Checking",      # per-device probe start (detail shown by START/END)
+    "[main] heartbeat sent",   # every 30s -- use --debug to watch metrics
+    "[main] scan START",       # use --debug to time scans
+    "[main] scan END",
+    "[boot] Free memory:",     # boot banner line
+)
+
+
+def _line_should_show(line, debug):
+    if debug:
+        return True
+    return not any(pat in line for pat in _VERBOSE_PATTERNS)
+
+
+def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
+    """Stream serial output forever. If the port disappears (Pico reboot),
+    poll for it to come back for up to `reconnect_grace` seconds before
+    giving up.
+    """
+    import os
+    import time
+    import serial
+
+    while True:
+        leftover = ""
+        try:
+            with serial.Serial(port, 115200, timeout=0.5) as ser:
+                while True:
+                    data = ser.read(ser.in_waiting or 1)
+                    if not data:
+                        continue
+                    text = leftover + data.decode(errors="replace")
+                    parts = text.split("\n")
+                    leftover = parts.pop()
+                    for line in parts:
+                        if _line_should_show(line, debug):
+                            sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
+        except (serial.SerialException, OSError) as e:
+            click.echo(
+                f"\n[logs] serial dropped ({e}); waiting up to "
+                f"{int(reconnect_grace)}s for {port} to come back...",
+                err=True,
+            )
+            deadline = time.time() + reconnect_grace
+            while time.time() < deadline:
+                if os.path.exists(port):
+                    time.sleep(0.5)
+                    click.echo("[logs] port reappeared, resuming.", err=True)
+                    break
+                time.sleep(0.5)
+            else:
+                click.echo(
+                    f"[logs] {port} did not come back within "
+                    f"{int(reconnect_grace)}s. Giving up.",
+                    err=True,
+                )
+                sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

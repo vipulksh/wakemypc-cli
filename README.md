@@ -7,7 +7,7 @@ Companion CLI for [wakemypc.com](https://wakemypc.com). Runs on your computer, t
 Direct from GitHub (recommended for now -- no PyPI release yet):
 
 ```bash
-pip install git+https://github.com/wakemypc/wakemypc-cli.git
+pip install git+https://github.com/vipulksh/wakemypc-cli.git
 ```
 
 Verify:
