@@ -544,16 +544,18 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
 @cli.command()
 @click.option(
     "--api-url",
-    required=True,
-    help="Base URL of your Django server (e.g. https://example.com)",
+    default=None,
+    help="Base URL of your Django server (e.g. https://example.com). Required unless --token is given.",
 )
-@click.option("--username", required=True, help="Your Django server username")
+@click.option(
+    "--username",
+    default=None,
+    help="Your Django server username. Required unless --token is given.",
+)
 @click.option(
     "--password",
-    required=True,
-    prompt=True,
-    hide_input=True,
-    help="Your Django server password",
+    default=None,
+    help="Your Django server password. Will prompt if not given (and not --token).",
 )
 @click.option(
     "--port", default=None, help="Serial port (auto-detected if not specified)"
@@ -561,33 +563,75 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
 @click.option(
     "--name",
     default=None,
-    help="Human-friendly name for this Pico (e.g. 'Kitchen Sensor')",
+    help="Human-friendly name for this Pico (e.g. 'Kitchen Sensor'). Only used on fresh registration.",
 )
-def register(api_url, username, password, port, name):
+@click.option(
+    "--rotate",
+    is_flag=True,
+    default=False,
+    help="Rotate the token of an already-registered Pico instead of creating a new one. The previous token is invalidated.",
+)
+@click.option(
+    "--token",
+    default=None,
+    help="Skip the server entirely; just write this device_token to the Pico's secrets.json. Useful when you rotated the token via the dashboard and want to push the result over USB.",
+)
+def register(api_url, username, password, port, name, rotate, token):
     """
-    Register this Pico on the Django server and get a device_token.
+    Register this Pico on the Django server, rotate its token, or write
+    a token directly.
 
-    This command:
+    Three modes, picked by flags:
 
-        1. Logs into the server with your credentials.
+      Fresh registration (default):
+        pico-cli register --api-url https://example.com --username admin --password pass
 
-        2. Reads the Pico's unique hardware ID.
+      Rotate an already-registered Pico's token (server invalidates the old one):
+        pico-cli register --api-url https://example.com --username admin --password pass --rotate
 
-        3. Registers the device on the server.
+      Push a token you already have (no server call -- e.g. you rotated via the dashboard):
+        pico-cli register --token <device_token>
 
-        4. Writes the device_token back to the Pico's secrets.json.
-
-    After registration, the Pico can authenticate with the server
-    to send sensor data.
-
-    Example usage:
-
-    pico-cli register --api-url https://example.com --username admin --password pass
-
-    pico-cli register --api-url https://example.com --username admin --password pass --name "Kitchen Sensor"
+    The resulting device_token is always merged into the Pico's secrets.json
+    (existing WiFi config and other fields are preserved).
     """
     from .serial_detect import get_single_pico_port
     from .register import register_and_provision
+
+    # Validate flag combinations up front so the user sees a clear message
+    # instead of a confusing failure mid-flow.
+    if rotate and token:
+        raise click.UsageError(
+            "--rotate and --token are mutually exclusive. Pick one:\n"
+            "  --rotate  to ask the server for a new token\n"
+            "  --token   to push a token you already have"
+        )
+
+    if token:
+        token = token.strip()
+        if not token:
+            raise click.UsageError("--token cannot be empty.")
+        # api_url/username/password are not used in --token mode; warn if
+        # the user passed them by accident so they don't think the server
+        # got contacted.
+        if api_url or username or password:
+            click.echo(
+                "Note: --token mode skips the server, so --api-url / --username / "
+                "--password are ignored.",
+                err=True,
+            )
+    else:
+        # Server-touching modes need credentials. Use Click's prompt for the
+        # password so it isn't echoed; api-url and username are required up
+        # front so the prompt sequence is predictable.
+        if not api_url:
+            raise click.UsageError("--api-url is required (unless using --token).")
+        if not username:
+            raise click.UsageError("--username is required (unless using --token).")
+        if not password:
+            password = click.prompt(
+                "Password", hide_input=True, confirmation_prompt=False
+            )
 
     try:
         port = get_single_pico_port(port)
@@ -595,7 +639,12 @@ def register(api_url, username, password, port, name):
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    click.echo(f"Registering Pico on {port} with server {api_url}...")
+    if token:
+        click.echo(f"Writing token to Pico on {port} (no server call)...")
+    elif rotate:
+        click.echo(f"Rotating token for the Pico on {port} via {api_url}...")
+    else:
+        click.echo(f"Registering Pico on {port} with server {api_url}...")
 
     try:
         result = register_and_provision(
@@ -604,20 +653,28 @@ def register(api_url, username, password, port, name):
             password=password,
             port=port,
             device_name=name,
+            rotate=rotate,
+            manual_token=token,
         )
         click.echo(f"\n{'=' * 60}")
-        click.echo("Device registered successfully!")
+        if token:
+            click.echo("Token written to Pico.")
+        elif rotate:
+            click.echo("Token rotated.")
+        else:
+            click.echo("Device registered successfully!")
         click.echo(f"{'=' * 60}")
         click.echo(f"\n  Device ID:    {result['device_id']}")
         click.echo(f"  Device Token: {result['device_token']}")
         click.echo(f"  Port:         {result['port']}")
         click.echo(f"\n{'=' * 60}")
-        click.echo("SAVE THE DEVICE TOKEN ABOVE -- it is shown only once!")
-        click.echo(f"{'=' * 60}")
-        click.echo("\nThe token has also been written to the Pico's secrets.json.")
-        click.echo(
-            "The Pico is now ready. Plug it into a power source to start transmitting."
-        )
+        # On manual-token we don't repeat "save this once" -- the user
+        # already has the token. On register/rotate we do, since the server
+        # only emits the raw token here.
+        if not token:
+            click.echo("SAVE THE DEVICE TOKEN ABOVE -- it is shown only once!")
+            click.echo(f"{'=' * 60}")
+        click.echo(f"\n{result.get('message', 'Done.')}")
     except RuntimeError as e:
         click.echo(f"\nError: {e}", err=True)
         sys.exit(1)
