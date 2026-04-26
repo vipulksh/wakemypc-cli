@@ -821,16 +821,29 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
 
     while True:
         leftover = ""
+        ser = None
         try:
-            # dtr=False, rts=False: pyserial asserts both lines on open by
-            # default. On the rp2 USB CDC stack, that pulse can interrupt
-            # MicroPython startup before main.py runs, leaving the firmware
-            # parked in REPL with no WiFi -- which is exactly the post-OTA
-            # bug we hunted through firmware v0.3.2-v0.3.4 before realising
-            # it was a host-side issue. Hold the lines low on every open.
-            with serial.Serial(
-                port, 115200, timeout=0.5, dtr=False, rts=False
-            ) as ser:
+            # Hold DTR and RTS low BEFORE the port opens.
+            #
+            # WHY: pyserial asserts both lines on open by default. On the
+            # rp2 USB CDC stack, that pulse can interrupt MicroPython
+            # startup before main.py runs, parking the firmware in REPL
+            # with no WiFi -- the post-OTA bug we hunted through firmware
+            # v0.3.2-v0.3.4 before realising it was host-side.
+            #
+            # pyserial doesn't accept `dtr`/`rts` as Serial() constructor
+            # kwargs (it raises ValueError). The supported pattern is to
+            # configure an unopened Serial(), set the dtr/rts properties,
+            # then call .open(). Properties set on the instance before
+            # open determine the initial state of the lines.
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = 115200
+            ser.timeout = 0.5
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
+            try:
                 while True:
                     data = ser.read(ser.in_waiting or 1)
                     if not data:
@@ -842,6 +855,11 @@ def _stream_serial_with_reconnect(port, reconnect_grace=10.0, debug=False):
                         if _line_should_show(line, debug):
                             sys.stdout.write(line + "\n")
                     sys.stdout.flush()
+            finally:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
         except (serial.SerialException, OSError) as e:
             click.echo(
                 f"\n[logs] serial dropped ({e}); waiting up to "

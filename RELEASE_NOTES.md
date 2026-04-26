@@ -1,4 +1,35 @@
-## v1.0.3 — Stop interrupting the Pico after OTA
+## v1.0.4 — pyserial DTR/RTS API fix (v1.0.3 was broken)
+
+**Hotfix for v1.0.3.** v1.0.3 passed `dtr=False, rts=False` as
+constructor kwargs to `serial.Serial(...)`. pyserial does not accept
+those as constructor arguments — it raises `ValueError: unexpected
+keyword arguments: {'dtr': False, 'rts': False}` and `wakemypc logs`
+crashed on startup. Anyone who upgraded to v1.0.3 should upgrade
+straight to v1.0.4.
+
+The supported pattern is:
+
+```python
+ser = serial.Serial()
+ser.port = port
+ser.baudrate = 115200
+ser.timeout = 0.5
+ser.dtr = False
+ser.rts = False
+ser.open()
+```
+
+Properties set on an unopened `Serial()` instance determine the
+initial state of the DTR/RTS lines when `.open()` is called. v1.0.4
+uses this pattern.
+
+Same intent as v1.0.3 — DTR/RTS are held low so opening the serial
+port can no longer pulse the rp2 USB CDC stack and interrupt the
+booting Pico. The post-reconnect grace delay is still 3s, the
+`--catch-up` flag and `_recover_log_buffer_after_reconnect` are still
+gone. Only the API call shape changed.
+
+## v1.0.3 — Stop interrupting the Pico after OTA (broken; use v1.0.4)
 
 **Bug fix.** `wakemypc logs` was the actual cause of the "Pico stuck
 after OTA" loop that we chased through firmware v0.3.2 -> v0.3.4. With
@@ -22,7 +53,8 @@ v0.3.2. With the streamer attached, two things broke the boot:
 
 - Every `serial.Serial(...)` open in `wakemypc logs` now passes
   `dtr=False, rts=False` so opening the port can no longer pulse the
-  Pico's USB lines.
+  Pico's USB lines. (NOTE: this API call is invalid on stock pyserial
+  and crashes on startup — see v1.0.4 for the correct shape.)
 - The post-reconnect grace delay was bumped from 500ms to 3s so
   MicroPython has clear runway to finish boot.py + main.py before the
   host attaches.
