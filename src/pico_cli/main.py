@@ -706,6 +706,73 @@ def register(api_url, username, password, port, name, rotate, token):
 
 
 # ---------------------------------------------------------------------------
+# LOGS -- Stream the Pico's serial-console output
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@click.option(
+    "--port",
+    default=None,
+    help="Serial port of the Pico (e.g. /dev/ttyACM0). Auto-detected if not specified.",
+)
+def logs(port):
+    """
+    Stream the Pico's serial console to your terminal.
+
+    The Pico prints boot info, dispatch traces, and errors over USB
+    serial. This subcommand opens the port and pipes everything to
+    stdout in real time, like:
+
+        screen /dev/ttyACM0 115200
+
+    ...but without the modal escape sequences and without taking the
+    port hostage.
+
+    Disconnecting (Ctrl+C) does NOT reset the Pico -- it keeps running
+    normally, you just stop watching. Re-run `pico-cli logs` any time
+    to reattach.
+
+    Examples:
+      pico-cli logs                          # auto-detect single Pico
+      pico-cli logs --port /dev/ttyACM1      # specific Pico when several plugged in
+    """
+    import serial
+    from .serial_detect import get_single_pico_port
+
+    try:
+        port = get_single_pico_port(port)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Reading logs from {port} -- Ctrl+C to stop\n", err=True)
+
+    try:
+        # 115200 is MicroPython's default REPL baudrate. timeout=0.5
+        # makes ser.read() return promptly even when there's nothing
+        # buffered, so Ctrl+C is responsive.
+        with serial.Serial(port, 115200, timeout=0.5) as ser:
+            while True:
+                # Read whatever's already buffered, fall back to a single
+                # byte so the loop doesn't spin when the port is idle.
+                data = ser.read(ser.in_waiting or 1)
+                if data:
+                    sys.stdout.write(data.decode(errors="replace"))
+                    sys.stdout.flush()
+    except KeyboardInterrupt:
+        click.echo("\nDisconnected.", err=True)
+    except serial.SerialException as e:
+        click.echo(f"\nSerial error: {e}", err=True)
+        click.echo(
+            "Make sure no other tool (Thonny, screen, mpremote repl) "
+            "has the port open.",
+            err=True,
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # IDENTIFY -- Blink LED for physical identification
 # ---------------------------------------------------------------------------
 
