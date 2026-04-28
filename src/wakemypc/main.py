@@ -330,13 +330,21 @@ def restart(port, bootloader):
     default=False,
     help="Don't soft-reset the Pico after a successful upload. By default, upload reboots the Pico so it re-imports the newly-uploaded modules.",
 )
+@click.option(
+    "--github",
+    is_flag=True,
+    default=False,
+    help="Upload Pico Firmware from a GitHub release directly to the Pico's filesystem.",
+)
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
-def upload(port, firmware_dir, no_restart, files):
+def upload(port, firmware_dir, github, no_restart, files):
     """
     Upload Python files to the Pico's filesystem.
 
     You can specify individual files or a directory containing .py files:
-
+      
+      wakemypc upload --github
+      
       wakemypc upload main.py config.py
 
       wakemypc upload --firmware-dir ./pico_firmware/src/
@@ -351,8 +359,12 @@ def upload(port, firmware_dir, no_restart, files):
     Uses mpremote if installed (recommended: pip install mpremote), otherwise
     falls back to slower serial REPL transfer.
     """
+    # Verify that firmware-dir and github are not use together
+    if firmware_dir and github:
+        click.echo("Error: --firmware-dir and --github options cannot be used together.", err=True)
+        sys.exit(1)
     from .serial_detect import get_single_pico_port
-    from .upload import upload_files, is_mpremote_available, reset_pico_via_mpremote
+    from .upload import upload_files, is_mpremote_available, reset_pico_via_mpremote, upload_from_github_release
 
     # Resolve the port
     try:
@@ -360,10 +372,34 @@ def upload(port, firmware_dir, no_restart, files):
     except RuntimeError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    
+    # Results of upload
+    results = []
+    
+    # Show transfer method
+    if is_mpremote_available():
+        click.echo("Using mpremote for file transfer (fast, reliable)")
+    else:
+        click.echo("mpremote not found, using serial REPL fallback (slower)")
+        click.echo("Tip: install mpremote for faster transfers: pip install mpremote")
+    
+    # Use github release upload if --github flag is set
+    if github:
+        click.echo("Uploading firmware from GitHub release...")
+        try:
+            results = upload_from_github_release(port, repo="vipulksh/wakemypc-firmware")
+            click.echo("Using mpremote for file transfer (fast, reliable)")
+            click.echo("\nUpload from GitHub release completed successfully!")
+            click.echo("Next step: provision with 'wakemypc provision' or register with 'wakemypc register'")
 
-    # Collect files to upload
-    file_list = list(files)
-    if firmware_dir:
+        except Exception as e:
+            click.echo(f"\nError during GitHub release upload: {e}", err=True)
+            click.echo("Try executing the command again!")
+            sys.exit(1)
+
+    elif firmware_dir:
+        # Collect files to upload
+        file_list = list(files)
         firmware_path = Path(firmware_dir)
         py_files = sorted(firmware_path.glob("*.py"))
         if not py_files:
@@ -387,23 +423,16 @@ def upload(port, firmware_dir, no_restart, files):
             sys.exit(1)
         file_list.extend(str(f) for f in py_files)
 
-    if not file_list:
-        click.echo(
-            "No files specified. Use --firmware-dir or pass file paths.", err=True
-        )
-        click.echo("Example: wakemypc upload --firmware-dir ./pico_firmware/src/")
-        sys.exit(1)
+        if not file_list:
+            click.echo(
+                "No files specified. Use --firmware-dir or pass file paths.", err=True
+            )
+            click.echo("Example: wakemypc upload --firmware-dir ./pico_firmware/src/")
+            sys.exit(1)
 
-    # Show transfer method
-    if is_mpremote_available():
-        click.echo("Using mpremote for file transfer (fast, reliable)")
-    else:
-        click.echo("mpremote not found, using serial REPL fallback (slower)")
-        click.echo("Tip: install mpremote for faster transfers: pip install mpremote")
+        click.echo(f"\nUploading {len(file_list)} file(s) to Pico on {port}...\n")
 
-    click.echo(f"\nUploading {len(file_list)} file(s) to Pico on {port}...\n")
-
-    results = upload_files(port, file_list)
+        results = upload_files(port, file_list)
 
     success_count = sum(1 for r in results if r["success"])
     fail_count = len(results) - success_count

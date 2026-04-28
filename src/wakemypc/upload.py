@@ -54,6 +54,9 @@ write files by sending commands like:
 import subprocess
 import shutil
 import time
+import tempfile
+import json
+import requests
 from pathlib import Path
 
 import serial
@@ -432,3 +435,61 @@ def list_files_on_pico(port, baudrate=115200):
         return output
     except Exception as e:
         return f"Error listing files: {e}"
+
+def _get_release(repo, version):
+    if version == "latest":
+        url = f"https://api.github.com/repos/{repo}/releases/latest"
+    else:
+        url = f"https://api.github.com/repos/{repo}/releases/tags/{version}"
+
+    r = requests.get(url)
+    if r.status_code != 200:
+        raise ValueError(f"Version {version} not found")
+
+    return r.json()
+
+def _find_asset(release, name):
+    for asset in release["assets"]:
+        if asset["name"] == name:
+            return asset["browser_download_url"]
+    return None
+
+def _download_file(url, dest):
+    r = requests.get(url)
+    r.raise_for_status()
+    dest.write_bytes(r.content)
+
+def upload_from_github_release(port, repo, version="latest"):
+    """
+    Uploads Pico Firmware from github releases directly to the Pico's filesystem. 
+    Useful for users who don't want to manually download and extract the release assets.
+    """
+    release = _get_release(repo, version)
+
+    manifest_url = _find_asset(release, "MANIFEST.json")
+    if not manifest_url:
+        raise RuntimeError("MANIFEST.json not found in release")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        manifest_path = tmp / "MANIFEST.json"
+        _download_file(manifest_url, manifest_path)
+
+        manifest = json.loads(manifest_path.read_text())
+
+        local_files = []
+
+        for file in manifest["files"]:
+            asset_url = _find_asset(release, file)
+            if not asset_url:
+                raise RuntimeError(f"{file} missing in release")
+
+            dest = tmp / file
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            _download_file(asset_url, dest)
+            local_files.append(dest)
+        
+        return upload_files(port, local_files)
+    
