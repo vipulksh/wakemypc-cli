@@ -1089,6 +1089,28 @@ def status(port):
                 click.echo(f"  CPU Freq:     {int(line) // 1_000_000} MHz")
                 break
 
+        # --- Read MicroPython version ---
+        response = run_command("import sys; print(sys.version)")
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith(">>>") and "import" not in line:
+                parts = line.split(";")
+                if len(parts) >= 2:
+                    micropython_info = parts[1].strip()
+                    click.echo(f"  MicroPython:  {micropython_info}")
+                else:
+                    click.echo(f"  MicroPython:  {line}")
+                break
+
+        # --- Read firmware version (if available) ---
+        # Read file /main.py and look for a line like FIRMWARE_VERSION = "x.y.z"
+        response = run_command("from main import FIRMWARE_VERSION; print(FIRMWARE_VERSION)")
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line and not line.startswith(">>>") and "import" not in line:
+                click.echo(f"  Firmware Ver: {line}")
+                break
+
         # --- Read WiFi status ---
         click.echo(f"\nWiFi Status:")
         click.echo("-" * 40)
