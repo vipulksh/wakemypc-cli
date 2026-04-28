@@ -32,9 +32,10 @@
 name: Publish to PyPI
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_run:
+    workflows: ["Release CLI"]   # must match name: in release.yml
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       tag:

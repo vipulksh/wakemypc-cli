@@ -36,7 +36,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build
+      - name: Validate release notes
+        run: |
+          set -euo pipefail
 
+          tag="${GITHUB_REF_NAME}"   # e.g. v1.0.5
+          # Read first line and normalize:
+          # - remove leading ##
+          # - trim spaces
+          # - remove CR (Windows line endings)
+          first_line=$(head -n 1 RELEASE_NOTES.md | sed -E 's/^##[[:space:]]*//' | tr -d '\r')
+
+          echo "Tag: $tag"
+          echo "First line: $first_line"
+
+          # Check format: must start with vX.X.X
+          if ! [[ "$first_line" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::RELEASE_NOTES.md must start with vX.X.X"
+            exit 1
+          fi
+          # remove after vX.X.X (e.g. " - fixed bug") to compare with tag
+          first_line=$(echo "$first_line" | sed -E 's/^(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+
+          # Check it matches the tag exactly
+          if [[ "$first_line" != "$tag" ]]; then
+            echo "::error::RELEASE_NOTES.md version ($first_line) does not match tag ($tag)"
+            exit 1
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
