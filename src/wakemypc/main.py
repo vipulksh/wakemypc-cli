@@ -333,21 +333,32 @@ def restart(port, bootloader):
 @click.option(
     "--github",
     is_flag=True,
-    default=False,
-    help="Upload Pico Firmware from a GitHub release directly to the Pico's filesystem.",
+    default=None,
+    help="Upload Pico Firmware from a GitHub release directly to the Pico's filesystem. Allowed mentions: v1.0.0, latest (defaults to latest release if flag is present without value).",
 )
-@click.argument("files", nargs=-1, type=click.Path(exists=True))
-def upload(port, firmware_dir, github, no_restart, files):
+@click.option(
+    "--version",
+    default="latest",
+    help="Version of the GitHub release to upload (e.g., v1.0.0)."
+)
+@click.argument(
+    "files",
+    nargs=-1,
+    type=click.Path(exists=True)
+)
+def upload(port, firmware_dir, github, version, no_restart, files):
     """
     Upload Python files to the Pico's filesystem.
 
-    You can specify individual files or a directory containing .py files:
-      
-      wakemypc upload --github
-      
-      wakemypc upload main.py config.py
+    Usage examples:
 
-      wakemypc upload --firmware-dir ./pico_firmware/src/
+      wakemypc upload main.py config.py  (uploads specific files)
+
+      wakemypc upload --github      (uploads from the latest GitHub release)
+
+      wakemypc upload --github v1.0.0     (uploads from a specific GitHub release)
+
+      wakemypc upload --firmware-dir ./pico_firmware/src/ (uploads all .py files from a directory)
 
     The files are uploaded to the root of the Pico's filesystem. The Pico
     runs main.py automatically on boot, so make sure that file exists.
@@ -356,8 +367,7 @@ def upload(port, firmware_dir, github, no_restart, files):
     immediately re-imports the new modules. Pass --no-restart to skip
     the reboot (e.g. when staging a multi-step deploy).
 
-    Uses mpremote if installed (recommended: pip install mpremote), otherwise
-    falls back to slower serial REPL transfer.
+    Uses mpremote to transfer files.
     """
     # Verify that firmware-dir and github are not use together
     if firmware_dir and github:
@@ -366,6 +376,13 @@ def upload(port, firmware_dir, github, no_restart, files):
     from .serial_detect import get_single_pico_port
     from .upload import upload_files, is_mpremote_available, reset_pico_via_mpremote, upload_from_github_release
 
+    if not firmware_dir and github is None and not files:
+        # Print help if user runs without any upload source specified, instead of
+        # showing an error about missing arguments.
+        click.echo("\nNo files specified for upload.\n")
+        click.echo(click.get_current_context().get_help())
+        sys.exit(1)
+    
     # Resolve the port
     try:
         port = get_single_pico_port(port)
@@ -385,16 +402,17 @@ def upload(port, firmware_dir, github, no_restart, files):
     
     # Use github release upload if --github flag is set
     if github:
+        # check format of github argument
+        tag = version if version else "latest"
+        
         click.echo("Uploading firmware from GitHub release...")
         try:
-            results = upload_from_github_release(port, repo="vipulksh/wakemypc-firmware")
+            results = upload_from_github_release(port, repo="vipulksh/wakemypc-firmware", version=tag)
             click.echo("Using mpremote for file transfer (fast, reliable)")
             click.echo("\nUpload from GitHub release completed successfully!")
-            click.echo("Next step: provision with 'wakemypc provision' or register with 'wakemypc register'")
 
         except Exception as e:
             click.echo(f"\nError during GitHub release upload: {e}", err=True)
-            click.echo("Try executing the command again!")
             sys.exit(1)
 
     elif firmware_dir:
@@ -439,9 +457,9 @@ def upload(port, firmware_dir, github, no_restart, files):
 
     for r in results:
         if r["success"]:
-            click.echo(f"  OK   {r['file']} -> {r.get('remote', '?')}")
+            click.echo(f"  OK   {'/'.join(r['file'].split('/')[-2:])} -> {r.get('remote', '?')}")
         else:
-            click.echo(f"  FAIL {r['file']}: {r['error']}")
+            click.echo(f"  FAIL {'/'.join(r['file'].split('/')[-2:])}: {r['error']}")
 
     click.echo(f"\nUploaded: {success_count}  Failed: {fail_count}")
 

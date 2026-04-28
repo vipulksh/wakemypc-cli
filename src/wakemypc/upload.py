@@ -481,11 +481,11 @@ def upload_from_github_release(port, repo, version="latest"):
         local_files = []
 
         for file in manifest["files"]:
-            asset_url = _find_asset(release, file)
+            asset_url = _find_asset(release, file["path"])
             if not asset_url:
                 raise RuntimeError(f"{file} missing in release")
 
-            dest = tmp / file
+            dest = tmp / file["path"]
             dest.parent.mkdir(parents=True, exist_ok=True)
 
             _download_file(asset_url, dest)
