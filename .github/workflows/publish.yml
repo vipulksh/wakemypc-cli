@@ -35,6 +35,11 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag to publish (must match pyproject.toml version)'
+        required: true
 
 jobs:
   build:
@@ -43,6 +48,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -61,7 +68,11 @@ jobs:
         # (the wheel filename would still be wakemypc-1.0.4-...).
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
           pkg_version=$(python -c "
           try:
               import tomllib
@@ -71,8 +82,8 @@ jobs:
               print(tomllib.load(f)['project']['version'])
           ")
           echo "tag=${tag}  pyproject=${pkg_version}"
-          if [ "${tag}" != "${pkg_version}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${pkg_version}"
+          if [ "${tag}" != "v${pkg_version}" ]; then
+            echo "::error::Tag ${tag} does not match pyproject.toml version ${pkg_version}"
             exit 1
           fi
 
