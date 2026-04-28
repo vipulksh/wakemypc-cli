@@ -25,10 +25,10 @@ Here is the typical order of operations for a brand new Pico:
   3. wakemypc upload --firmware-dir ./pico_firmware/src/
      Upload your application Python files to the Pico's filesystem.
 
-  4. wakemypc provision --server-url https://example.com --wifi-ssid MyNetwork --wifi-pass secret
+  4. wakemypc provision --server-url https://wakemypc.com --wifi-ssid MyNetwork --wifi-pass secret
      Write WiFi credentials and server URL to the Pico's secrets.json.
 
-  5. wakemypc register --api-url https://example.com --username admin --password pass
+  5. wakemypc register --api-url https://wakemypc.com --username admin --password pass
      Register the Pico on the server and get a device_token written to it.
 
   6. wakemypc identify
@@ -495,7 +495,8 @@ def upload(port, firmware_dir, github, version, no_restart, files):
 @click.option(
     "--server-url",
     required=False,
-    help="URL of your Django server (e.g. https://example.com)",
+    default="https://wakemypc.com",
+    help="URL of your WakeMyPC server (e.g. https://wakemypc.com)",
 )
 @click.option("-a", "--add-new-wifi", required=False, is_flag=True, help="Add new WiFi network instead of replacing existing ones")
 @click.option("-c", "--clear-wifi", required=False, is_flag=True, help="Clear all existing WiFi networks from config")
@@ -519,7 +520,7 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
     Examples:
 
       First-time setup (all fields required):
-        wakemypc provision --server-url https://example.com --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
+        wakemypc provision --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
 
       Update just the server URL (keep existing WiFi):
         wakemypc provision --server-url https://new-server.com
