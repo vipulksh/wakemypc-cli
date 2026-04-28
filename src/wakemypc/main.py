@@ -356,7 +356,7 @@ def upload(port, firmware_dir, github, version, no_restart, files):
 
       wakemypc upload --github      (uploads from the latest GitHub release)
 
-      wakemypc upload --github v1.0.0     (uploads from a specific GitHub release)
+      wakemypc upload --github --version v1.0.0     (uploads from a specific GitHub release)
 
       wakemypc upload --firmware-dir ./pico_firmware/src/ (uploads all .py files from a directory)
 
