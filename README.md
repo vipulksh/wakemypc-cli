@@ -11,6 +11,13 @@ Create a virtual environment.
 python -m venv .venv
 ```
 
+Activate virtual environment.
+```bash
+source .venv/bin/activate #linux/MacOS
+.venv\Scripts\Activate.bat #Command prompt
+.\.venv\Scripts\Activate.ps1 #Powershell
+```
+
 Use pip:
 
 ```bash
