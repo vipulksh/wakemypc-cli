@@ -47,36 +47,45 @@ jobs:
     name: Build distributions
     runs-on: ubuntu-latest
     steps:
-      - name: Check out source
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Build sdist + wheel
+      - name: Determine ref
+        id: ref
         run: |
-          python -m pip install --upgrade pip build
-          python -m build
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check out source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
-      - name: Get tag from commit
+      - name: Get tag (workflow_run only)
         id: tag
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         run: |
-          tag=$(git tag --points-at ${{ github.event.workflow_run.head_sha }} | grep '^v' | head -n 1)
+          tag=$(git tag --points-at HEAD | grep '^v' | head -n 1)
           if [ -z "$tag" ]; then
             echo "No tag found for commit"
             exit 1
           fi
           echo "tag=$tag" >> $GITHUB_OUTPUT
+      
+      - name: Set tag
+        id: final_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
+          fi
+        
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
       - name: Verify the tag matches pyproject.toml version
         # Catches the easy mistake of tagging v1.0.5 without bumping
@@ -85,11 +94,8 @@ jobs:
         # (the wheel filename would still be wakemypc-1.0.4-...).
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ github.event.inputs.tag }}"
-          else
-            tag="${{ steps.tag.outputs.tag }}"
-          fi
+          tag="${{ steps.final_tag.outputs.tag }}"
+
           pkg_version=$(python -c "
           try:
               import tomllib
@@ -103,6 +109,11 @@ jobs:
             echo "::error::Tag ${tag} does not match pyproject.toml version ${pkg_version}"
             exit 1
           fi
+      
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
