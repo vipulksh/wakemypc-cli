@@ -1,0 +1,110 @@
+# Publish wakemypc to PyPI on tag push.
+#
+# Companion to release.yml -- both fire on the same `v*.*.*` tag push.
+# release.yml uploads the wheel + sdist to the GitHub Release;
+# publish.yml uploads the same artifacts to PyPI so users can
+# `pip install --upgrade wakemypc`.
+#
+# AUTHENTICATION: PyPI Trusted Publishing (OIDC).
+# -------------------------------------------------
+# This workflow uses PyPI's Trusted Publisher mechanism rather than an
+# API token. No secret needs to be stored in this repo. Trust is
+# established once on the PyPI side: in the "wakemypc" project's
+# settings, add a publisher with these exact values:
+#
+#   PyPI Project Name:   wakemypc
+#   Owner:               vipulksh
+#   Repository name:     wakemypc-cli
+#   Workflow filename:   publish.yml
+#   Environment name:    pypi
+#
+# (https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
+#
+# The `environment: pypi` declaration below is what binds the OIDC
+# token GitHub mints to the publisher above. Without the environment
+# match, PyPI rejects the publish even with valid OIDC.
+#
+# To switch back to API-token auth (simpler, less secure), delete the
+# `permissions: id-token: write` line and the `environment` block,
+# then add `password: ${{ secrets.PYPI_API_TOKEN }}` under the
+# pypa/gh-action-pypi-publish step's `with:`.
+
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Verify the tag matches pyproject.toml version
+        # Catches the easy mistake of tagging v1.0.5 without bumping
+        # version = "..." in pyproject.toml. Without this, PyPI would
+        # reject the upload as a duplicate of the previous version
+        # (the wheel filename would still be wakemypc-1.0.4-...).
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg_version=$(python -c "
+          try:
+              import tomllib
+          except ImportError:
+              import tomli as tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "tag=${tag}  pyproject=${pkg_version}"
+          if [ "${tag}" != "${pkg_version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${pkg_version}"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The `pypi` environment is the one bound to the Trusted Publisher
+    # on PyPI's side. If you also wire up a "TestPyPI" environment for
+    # dry runs, add a second job that points at it.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/wakemypc
+    permissions:
+      # OIDC: GitHub mints a short-lived token that PyPI verifies
+      # against the configured Trusted Publisher. No secret needed.
+      id-token: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # `release/v1` is the canonical floating tag the pypa team
+        # maintains; pinning to a specific SHA is stricter but means
+        # we'd need to bump it on every action update.
