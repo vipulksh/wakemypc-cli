@@ -60,26 +60,29 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
     """
     Browser-based ("loopback") OAuth-style login. Returns the JWT access token.
 
-    HOW IT WORKS
-    ------------
+    HOW IT WORKS  (loopback authorization-code exchange, modelled on RFC 8252)
+    --------------------------------------------------------------------------
       1. We bind a one-shot HTTP server on http://127.0.0.1:<random-free-port>.
       2. We open the user's browser at <api_url>/dashboard/cli-auth?... passing
          our loopback URL as redirect_uri and a fresh CSRF state token.
       3. The browser-side React page (frontend/src/pages/CliAuth.jsx) handles
          the actual sign-in flow (username/password OR "Sign in with Google"),
-         then redirects to redirect_uri?token=<JWT>&state=<state>.
-      4. Our local server captures token + state from that callback URL, hands
+         asks the server for a single-use authorization code, then redirects
+         to  redirect_uri?code=<code>&state=<state>.
+      4. Our local server captures code + state from that callback URL, hands
          a "you can close this tab" page back to the browser, then shuts down.
       5. We compare the returned state to the one we generated. If it matches,
-         we return the token; otherwise we abort.
+         we POST the code to <api_url>/api/jwtauth/cli-exchange/, which
+         atomically consumes the code and returns the JWT access token in the
+         response body. The token never appears in any URL.
 
-    WHY THIS PATTERN
-    ----------------
-    This is the same loopback flow that gh, gcloud, aws sso, and similar CLIs
-    use. It avoids forcing the user to copy-paste a token, supports any login
-    method the website itself supports (so Google sign-in works for free), and
-    never gives the website any access to the local machine beyond the
-    short-lived token it would have minted anyway.
+    WHY A CODE INSTEAD OF A TOKEN IN THE URL
+    ----------------------------------------
+    URLs end up in browser history, Referer headers, and screen-recordings.
+    A short-lived (5-minute) single-use code is much safer than a 15-minute
+    JWT in those places: by the time anyone could replay the URL, the code
+    has already been consumed by the legitimate CLI run. This is the same
+    pattern gh / gcloud / aws sso use.
 
     Parameters:
         api_url:      Base URL of the website (e.g. https://wakemypc.com)
@@ -107,19 +110,19 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path != "/callback":
                 # Anything else (favicon.ico, /, ...) gets a 404 so we
-                # don't accidentally accept tokens delivered to the wrong path.
+                # don't accidentally accept codes delivered to the wrong path.
                 self.send_response(404)
                 self.end_headers()
                 return
             qs = urllib.parse.parse_qs(parsed.query)
-            captured["token"] = (qs.get("token") or [None])[0]
+            captured["code"] = (qs.get("code") or [None])[0]
             captured["state"] = (qs.get("state") or [None])[0]
             captured["error"] = (qs.get("error") or [None])[0]
 
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            ok = bool(captured["token"]) and not captured["error"]
+            ok = bool(captured["code"]) and not captured["error"]
             if ok:
                 body = (
                     "<!doctype html><html><body style='font-family:system-ui;"
@@ -133,7 +136,7 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
                     "<!doctype html><html><body style='font-family:system-ui;"
                     "max-width:32rem;margin:4rem auto;text-align:center'>"
                     "<h2>Authentication failed</h2>"
-                    "<p>No token was returned. Check the terminal for details.</p>"
+                    "<p>No code was returned. Check the terminal for details.</p>"
                     "</body></html>"
                 )
             self.wfile.write(body.encode("utf-8"))
@@ -176,7 +179,9 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
             )
 
         if captured.get("error"):
-            raise RuntimeError(f"Browser sign-in reported an error: {captured['error']}")
+            raise RuntimeError(
+                f"Browser sign-in reported an error: {captured['error']}"
+            )
 
         if captured.get("state") != state:
             # Mismatched state means the callback didn't come from the page
@@ -187,13 +192,47 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
                 "server is misconfigured."
             )
 
-        token = captured.get("token")
-        if not token:
-            raise RuntimeError("Browser sign-in completed but no token was returned.")
-        return token
+        code = captured.get("code")
+        if not code:
+            raise RuntimeError(
+                "Browser sign-in completed but no auth code was returned."
+            )
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+    # Exchange the code for the actual JWT. The token comes back in the
+    # response body (not in a URL), and the code is single-use on the server
+    # so this is safe to do over HTTPS.
+    exchange_url = f"{api_url}/api/jwtauth/cli-exchange/"
+    try:
+        response = requests.post(
+            exchange_url,
+            json={"code": code},
+            timeout=15,
+        )
+    except requests.ConnectionError:
+        raise RuntimeError(
+            f"Could not reach {exchange_url} to exchange the auth code."
+        )
+    except requests.Timeout:
+        raise RuntimeError(f"Request to {exchange_url} timed out.")
+
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail", response.text[:200])
+        except ValueError:
+            detail = response.text[:200]
+        raise RuntimeError(
+            f"Code exchange failed (status {response.status_code}): {detail}"
+        )
+
+    access_token = response.json().get("access")
+    if not access_token:
+        raise RuntimeError(
+            "Code exchange succeeded but no access token was in the response."
+        )
+    return access_token
 
 
 def login_to_server(api_url, username, password):
