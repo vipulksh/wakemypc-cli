@@ -1,6 +1,6 @@
 [project]
 name = "wakemypc"
-version = "1.2.0"
+version = "1.2.1"
 description = "Companion CLI for wakemypc.com -- flash, provision, and manage Pico W transmitters from your terminal"
 readme = "README.md"
 license = { file = "LICENSE" }
