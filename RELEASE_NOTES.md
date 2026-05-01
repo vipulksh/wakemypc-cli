@@ -35,3 +35,18 @@ wakemypc register --api-url https://wakemypc.com --oauth --no-browser
   parameter on the callback, so other machines on the LAN can't deliver a
   token to your CLI.
 - Username/password registration (`--username` / `--password`) is unchanged.
+
+### Internal / release engineering
+
+No user-facing change, but contributors should know:
+
+- Releases are now cut automatically when a PR that bumps `pyproject.toml`
+  and `RELEASE_NOTES.md` is merged to `main`. The `Release CLI` workflow
+  pushes the `vX.Y.Z` tag, builds the wheel + sdist, and creates the GitHub
+  Release using `RELEASE_NOTES.md` as the body. PyPI publish then runs on
+  that workflow's completion.
+- Manually pushing a tag (`git push origin vX.Y.Z`) still works as an
+  escape hatch and follows the same path from "build" onward.
+- Both workflows are idempotent: a push to `main` that doesn't bump the
+  version is a no-op (no failed CI), and re-running publish for a version
+  already on PyPI is a no-op.

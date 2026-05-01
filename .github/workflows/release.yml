@@ -1,21 +1,41 @@
-# Build sdist + wheel and cut a GitHub Release on tag push.
+# Tag, build, and cut a GitHub Release.
 #
-# When you push a tag like `v1.0.1`, this workflow:
-#  1. Builds source distribution + wheel via `python -m build`.
-#  2. Creates a GitHub Release using RELEASE_NOTES.md as the body.
-#  3. Attaches the wheel and sdist as release assets.
+# Two ways this fires:
 #
-# To release:
+#   1. Push to main (the normal path -- e.g. PR merge):
+#        - Reads the version from the first line of RELEASE_NOTES.md.
+#        - Verifies it matches pyproject.toml.
+#        - If that tag does not yet exist, pushes it and cuts the release.
+#        - If the tag already exists (RELEASE_NOTES.md was not bumped),
+#          does nothing.
+#
+#   2. Tag push `vX.Y.Z` (manual escape hatch, kept for back-compat):
+#        - Skips the tag-creation step (the tag already exists).
+#        - Verifies tag == RELEASE_NOTES.md first line == pyproject.toml.
+#        - Builds and cuts the release.
+#
+# To release the normal way:
 #   1. Bump version in pyproject.toml.
-#   2. Edit RELEASE_NOTES.md with the changelog.
-#   3. Commit, tag (e.g. `git tag v1.0.1`), push (`git push origin v1.0.1`).
+#   2. Edit RELEASE_NOTES.md (first line: `## vX.Y.Z - <summary>`).
+#   3. Open a PR, merge to main. The workflow takes care of tag + release.
+#
+# Companion workflow publish.yml then runs on this workflow's completion
+# and uploads the same artifacts to PyPI.
+#
+# Note on tags pushed by this workflow: GitHub does NOT re-trigger
+# workflows for tags pushed using GITHUB_TOKEN. That is intentional
+# here -- the tag-push trigger below exists only for manual `git push
+# origin vX.Y.Z` flows, not to be re-fired by ourselves.
 
 name: Release CLI
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -26,47 +46,93 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          # Need full history + tags so we can detect whether the
+          # version in RELEASE_NOTES.md has already been released.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Build distributions
-        run: |
-          python -m pip install --upgrade pip build
-          python -m build
-      - name: Validate release notes
+      - name: Determine version and gate
+        id: gate
         run: |
           set -euo pipefail
 
-          tag="${GITHUB_REF_NAME}"   # e.g. v1.0.5
-          # Read first line and normalize:
-          # - remove leading ##
-          # - trim spaces
-          # - remove CR (Windows line endings)
+          # Pull intended tag from the first line of RELEASE_NOTES.md.
           first_line=$(head -n 1 RELEASE_NOTES.md | sed -E 's/^##[[:space:]]*//' | tr -d '\r')
+          echo "First line: ${first_line}"
 
-          echo "Tag: $tag"
-          echo "First line: $first_line"
-
-          # Check format: must start with vX.X.X
-          if ! [[ "$first_line" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "::error::RELEASE_NOTES.md must start with vX.X.X"
+          if ! [[ "${first_line}" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            echo "::error::RELEASE_NOTES.md must start with vX.Y.Z"
             exit 1
           fi
-          # remove after vX.X.X (e.g. " - fixed bug") to compare with tag
-          first_line=$(echo "$first_line" | sed -E 's/^(v[0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          tag="${BASH_REMATCH[1]}"
 
-          # Check it matches the tag exactly
-          if [[ "$first_line" != "$tag" ]]; then
-            echo "::error::RELEASE_NOTES.md version ($first_line) does not match tag ($tag)"
+          # Verify pyproject.toml agrees with RELEASE_NOTES.md.
+          pkg_version=$(python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "RELEASE_NOTES.md tag: ${tag}  pyproject: v${pkg_version}"
+          if [ "${tag}" != "v${pkg_version}" ]; then
+            echo "::error::RELEASE_NOTES.md (${tag}) does not match pyproject.toml (v${pkg_version})"
             exit 1
           fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+          # Tag-triggered run: the tag already exists; cross-check it
+          # matches RELEASE_NOTES.md and proceed.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if [ "${GITHUB_REF_NAME}" != "${tag}" ]; then
+              echo "::error::Pushed tag ${GITHUB_REF_NAME} does not match RELEASE_NOTES.md (${tag})"
+              exit 1
+            fi
+            echo "Triggered by tag push; releasing ${tag}."
+            echo "should_tag=false" >> "${GITHUB_OUTPUT}"
+            echo "released=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Branch / dispatch: only release if the tag is new.
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists -- nothing to release."
+            echo "should_tag=false" >> "${GITHUB_OUTPUT}"
+            echo "released=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Tag ${tag} is new -- will tag and release."
+            echo "should_tag=true" >> "${GITHUB_OUTPUT}"
+            echo "released=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build distributions
+        if: steps.gate.outputs.released == 'true'
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Create and push tag
+        # Only create a tag on branch / dispatch runs where the tag
+        # didn't already exist. On tag-push runs the tag is already there.
+        if: steps.gate.outputs.should_tag == 'true'
+        env:
+          TAG: ${{ steps.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "${TAG}"
+
       - name: Create GitHub Release
+        if: steps.gate.outputs.released == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ steps.gate.outputs.tag }}
+          name: ${{ steps.gate.outputs.tag }}
           body_path: RELEASE_NOTES.md
           files: dist/*

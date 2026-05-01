@@ -1,9 +1,15 @@
 # Publish wakemypc to PyPI on tag push.
 #
-# Companion to release.yml -- both fire on the same `v*.*.*` tag push.
-# release.yml uploads the wheel + sdist to the GitHub Release;
-# publish.yml uploads the same artifacts to PyPI so users can
-# `pip install --upgrade wakemypc`.
+# Companion to release.yml. release.yml fires on a push to main (or a
+# tag push) and may or may not actually create a release -- it skips
+# when RELEASE_NOTES.md hasn't been bumped. This workflow runs on
+# release.yml's completion and decides whether there's anything new to
+# publish:
+#
+#   - If no tag points at the commit that triggered release.yml,
+#     nothing was released -> skip.
+#   - If PyPI already has that version, it was published earlier -> skip.
+#   - Otherwise build + upload.
 #
 # AUTHENTICATION: PyPI Trusted Publishing (OIDC).
 # -------------------------------------------------
@@ -46,14 +52,21 @@ jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    # Only run on workflow_dispatch, or on a successful Release CLI run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      tag: ${{ steps.gate.outputs.tag }}
     steps:
       - name: Determine ref
         id: ref
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "ref=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.inputs.tag }}" >> "${GITHUB_OUTPUT}"
           else
-            echo "ref=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+            echo "ref=${{ github.event.workflow_run.head_sha }}" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Check out source
@@ -62,60 +75,67 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 0
 
-      - name: Get tag (workflow_run only)
-        id: tag
-        if: ${{ github.event_name != 'workflow_dispatch' }}
-        run: |
-          tag=$(git tag --points-at HEAD | grep '^v' | head -n 1)
-          if [ -z "$tag" ]; then
-            echo "No tag found for commit"
-            exit 1
-          fi
-          echo "tag=$tag" >> $GITHUB_OUTPUT
-      
-      - name: Set tag
-        id: final_tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
-          fi
-        
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
-      - name: Verify the tag matches pyproject.toml version
-        # Catches the easy mistake of tagging v1.0.5 without bumping
-        # version = "..." in pyproject.toml. Without this, PyPI would
-        # reject the upload as a duplicate of the previous version
-        # (the wheel filename would still be wakemypc-1.0.4-...).
+      - name: Decide whether to publish
+        # Single combined gate so we only set `skip` in one place.
+        # Skip cleanly (no error) if:
+        #   - workflow_run trigger but no tag points at the released commit
+        #     (Release CLI ran but didn't actually release anything), or
+        #   - the version is already on PyPI.
+        # Fail loudly if pyproject.toml and the tag disagree (real bug).
+        id: gate
         run: |
           set -euo pipefail
-          tag="${{ steps.final_tag.outputs.tag }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag=$(git tag --points-at HEAD | grep '^v' | head -n 1 || true)
+            if [ -z "${tag}" ]; then
+              echo "No tag points at $(git rev-parse HEAD) -- Release CLI ran but did not release. Skipping."
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              echo "tag=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
           pkg_version=$(python -c "
-          try:
-              import tomllib
-          except ImportError:
-              import tomli as tomllib
+          import tomllib
           with open('pyproject.toml', 'rb') as f:
               print(tomllib.load(f)['project']['version'])
           ")
-          echo "tag=${tag}  pyproject=${pkg_version}"
+          echo "tag=${tag}  pyproject=v${pkg_version}"
           if [ "${tag}" != "v${pkg_version}" ]; then
             echo "::error::Tag ${tag} does not match pyproject.toml version ${pkg_version}"
             exit 1
           fi
-      
+
+          # Idempotency: if PyPI already has this version, don't re-publish.
+          # `pip index versions` can be flaky; the JSON endpoint returns 200
+          # for known versions and 404 otherwise.
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/wakemypc/${pkg_version}/json")
+          if [ "${status}" = "200" ]; then
+            echo "wakemypc ${pkg_version} is already on PyPI -- skipping."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "wakemypc ${pkg_version} not on PyPI (HTTP ${status}) -- proceeding."
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Build distributions
+        if: steps.gate.outputs.skip == 'false'
         run: |
           python -m pip install --upgrade pip build
           python -m build
 
       - name: Upload artifacts
+        if: steps.gate.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -124,6 +144,7 @@ jobs:
   publish:
     name: Publish to PyPI
     needs: build
+    if: needs.build.outputs.skip == 'false'
     runs-on: ubuntu-latest
     # The `pypi` environment is the one bound to the Trusted Publisher
     # on PyPI's side. If you also wire up a "TestPyPI" environment for
