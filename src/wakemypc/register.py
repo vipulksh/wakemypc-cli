@@ -46,7 +46,154 @@ Our server uses JWT stored in HTTP cookies, but for this CLI tool we use the
 token directly in the Authorization header since we are not a browser.
 """
 
+import http.server
+import secrets
+import socketserver
+import threading
+import urllib.parse
+import webbrowser
+
 import requests
+
+
+def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
+    """
+    Browser-based ("loopback") OAuth-style login. Returns the JWT access token.
+
+    HOW IT WORKS
+    ------------
+      1. We bind a one-shot HTTP server on http://127.0.0.1:<random-free-port>.
+      2. We open the user's browser at <api_url>/dashboard/cli-auth?... passing
+         our loopback URL as redirect_uri and a fresh CSRF state token.
+      3. The browser-side React page (frontend/src/pages/CliAuth.jsx) handles
+         the actual sign-in flow (username/password OR "Sign in with Google"),
+         then redirects to redirect_uri?token=<JWT>&state=<state>.
+      4. Our local server captures token + state from that callback URL, hands
+         a "you can close this tab" page back to the browser, then shuts down.
+      5. We compare the returned state to the one we generated. If it matches,
+         we return the token; otherwise we abort.
+
+    WHY THIS PATTERN
+    ----------------
+    This is the same loopback flow that gh, gcloud, aws sso, and similar CLIs
+    use. It avoids forcing the user to copy-paste a token, supports any login
+    method the website itself supports (so Google sign-in works for free), and
+    never gives the website any access to the local machine beyond the
+    short-lived token it would have minted anyway.
+
+    Parameters:
+        api_url:      Base URL of the website (e.g. https://wakemypc.com)
+        timeout:      Seconds to wait for the user to finish signing in.
+        open_browser: If False, just print the URL instead of opening it.
+                      Useful for headless / SSH sessions; the user can paste
+                      the URL into a browser on another machine.
+
+    Returns:
+        The JWT access token string.
+    """
+    api_url = api_url.rstrip("/")
+    state = secrets.token_urlsafe(32)
+
+    captured = {}
+    done = threading.Event()
+
+    class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+        # Silence the default per-request access log so it doesn't pollute
+        # the CLI output the user is staring at.
+        def log_message(self, *args, **kwargs):
+            return
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != "/callback":
+                # Anything else (favicon.ico, /, ...) gets a 404 so we
+                # don't accidentally accept tokens delivered to the wrong path.
+                self.send_response(404)
+                self.end_headers()
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            captured["token"] = (qs.get("token") or [None])[0]
+            captured["state"] = (qs.get("state") or [None])[0]
+            captured["error"] = (qs.get("error") or [None])[0]
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            ok = bool(captured["token"]) and not captured["error"]
+            if ok:
+                body = (
+                    "<!doctype html><html><body style='font-family:system-ui;"
+                    "max-width:32rem;margin:4rem auto;text-align:center'>"
+                    "<h2>Authentication successful</h2>"
+                    "<p>You can close this tab and return to your terminal.</p>"
+                    "</body></html>"
+                )
+            else:
+                body = (
+                    "<!doctype html><html><body style='font-family:system-ui;"
+                    "max-width:32rem;margin:4rem auto;text-align:center'>"
+                    "<h2>Authentication failed</h2>"
+                    "<p>No token was returned. Check the terminal for details.</p>"
+                    "</body></html>"
+                )
+            self.wfile.write(body.encode("utf-8"))
+            done.set()
+
+    # Port 0 -> kernel hands us a random free port. Bind to 127.0.0.1 only
+    # so other machines on the LAN can't hit our callback.
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), _CallbackHandler)
+    port = httpd.server_address[1]
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+    auth_url = (
+        f"{api_url}/dashboard/cli-auth?"
+        f"redirect_uri={urllib.parse.quote(redirect_uri, safe='')}"
+        f"&state={urllib.parse.quote(state, safe='')}"
+    )
+
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        opened = False
+        if open_browser:
+            try:
+                opened = webbrowser.open(auth_url)
+            except Exception:
+                opened = False
+        if not opened:
+            # webbrowser.open returns False on headless systems with no
+            # browser configured. Print the URL so the user can paste it.
+            print(
+                f"Open this URL in a browser to sign in:\n  {auth_url}",
+                flush=True,
+            )
+
+        if not done.wait(timeout=timeout):
+            raise RuntimeError(
+                f"Timed out after {timeout}s waiting for browser sign-in.\n"
+                "If the browser did not open, copy the URL printed above and\n"
+                "paste it into a browser manually."
+            )
+
+        if captured.get("error"):
+            raise RuntimeError(f"Browser sign-in reported an error: {captured['error']}")
+
+        if captured.get("state") != state:
+            # Mismatched state means the callback didn't come from the page
+            # we sent the user to -- treat this as a CSRF / replay attempt.
+            raise RuntimeError(
+                "State mismatch in OAuth callback -- aborting for safety.\n"
+                "Try again; if this keeps happening, the cli-auth page on the\n"
+                "server is misconfigured."
+            )
+
+        token = captured.get("token")
+        if not token:
+            raise RuntimeError("Browser sign-in completed but no token was returned.")
+        return token
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def login_to_server(api_url, username, password):
@@ -303,6 +450,9 @@ def register_and_provision(
     device_name=None,
     rotate=False,
     manual_token=None,
+    use_oauth=False,
+    oauth_open_browser=True,
+    oauth_timeout=300,
 ):
     """
     Complete registration flow: login, read device ID, register, write token.
@@ -310,7 +460,12 @@ def register_and_provision(
     This is the high-level function called by 'wakemypc register'. It ties
     together the entire registration process:
 
-      1. Log into the server to get a JWT.
+      1. Authenticate with the server. Either:
+           - use_oauth=True   -> open the website's /dashboard/cli-auth page
+                                  in a browser, capture the JWT via a local
+                                  loopback callback (supports password OR
+                                  "Sign in with Google").
+           - default           -> POST username + password to /api/jwtauth/login/.
       2. Read the Pico's hardware ID via serial.
       3. Either:
            - rotate=True   -> rotate the existing Pico's token on the server
@@ -319,16 +474,26 @@ def register_and_provision(
       4. Write the resulting device_token back to the Pico's secrets.json.
 
     Parameters:
-        api_url:      Base URL of the website (e.g. https://example.com)
-        username:     Your username (ignored when manual_token is given)
-        password:     Your password (ignored when manual_token is given)
-        port:         Serial port of the Pico
-        device_name:  Optional human-friendly name (ignored on rotate)
-        rotate:       If True, rotate an already-registered Pico's token
-                      (server invalidates the old token, returns a new one).
-        manual_token: If set, skip all server calls and just write this
-                      token to the Pico. Use when you've already obtained
-                      a token via the dashboard's rotate flow.
+        api_url:            Base URL of the website (e.g. https://example.com)
+        username:           Your username (ignored when manual_token or
+                            use_oauth is set).
+        password:           Your password (ignored when manual_token or
+                            use_oauth is set).
+        port:               Serial port of the Pico.
+        device_name:        Optional human-friendly name (ignored on rotate).
+        rotate:             If True, rotate an already-registered Pico's token
+                            (server invalidates the old token, returns a new
+                            one).
+        manual_token:       If set, skip all server calls and just write this
+                            device_token to the Pico. Use when you've already
+                            obtained a token via the dashboard's rotate flow.
+        use_oauth:          If True, get the JWT via the browser-based OAuth
+                            flow instead of username/password.
+        oauth_open_browser: With use_oauth=True, whether to attempt to launch
+                            a browser. False prints the URL for manual paste
+                            (useful over SSH).
+        oauth_timeout:      With use_oauth=True, seconds to wait for the user
+                            to complete sign-in.
 
     Returns:
         A dict with registration details.
@@ -348,7 +513,14 @@ def register_and_provision(
         device_token = manual_token
         action_summary = "Token written from --token argument (no server call)."
     else:
-        access_token = login_to_server(api_url, username, password)
+        if use_oauth:
+            access_token = oauth_login_via_browser(
+                api_url,
+                timeout=oauth_timeout,
+                open_browser=oauth_open_browser,
+            )
+        else:
+            access_token = login_to_server(api_url, username, password)
 
         if rotate:
             public_id = find_pico_by_unique_id(api_url, access_token, device_id)

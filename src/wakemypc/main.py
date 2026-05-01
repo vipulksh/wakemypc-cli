@@ -665,24 +665,50 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
     default=None,
     help="Skip the server entirely; just write this device_token to the Pico's secrets.json. Useful when you rotated the token via the dashboard and want to push the result over USB.",
 )
-def register(api_url, username, password, port, name, rotate, token):
+@click.option(
+    "--oauth",
+    is_flag=True,
+    default=False,
+    help="Sign in via the website in your browser (supports username/password and 'Sign in with Google') instead of passing --username/--password, then proceed with the normal Pico registration (or rotation, with --rotate).",
+)
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    default=False,
+    help="With --oauth, do not try to launch a browser; print the URL to paste manually (useful over SSH).",
+)
+@click.option(
+    "--oauth-timeout",
+    type=int,
+    default=300,
+    show_default=True,
+    help="With --oauth, seconds to wait for the user to finish signing in.",
+)
+def register(api_url, username, password, port, name, rotate, token, oauth, no_browser, oauth_timeout):
     """
     Register this Pico on the Django server, rotate its token, or write
     a token directly.
 
-    Three modes, picked by flags:
+    Modes, picked by flags:
 
-      Fresh registration (default):
+      Fresh registration with username/password:
         wakemypc register --api-url https://example.com --username admin --password pass
+
+      Fresh registration via the browser (supports "Sign in with Google"):
+        wakemypc register --api-url https://example.com --oauth
 
       Rotate an already-registered Pico's token (server invalidates the old one):
         wakemypc register --api-url https://example.com --username admin --password pass --rotate
+        wakemypc register --api-url https://example.com --oauth --rotate
 
       Push a token you already have (no server call -- e.g. you rotated via the dashboard):
         wakemypc register --token <device_token>
 
-    The resulting device_token is always merged into the Pico's secrets.json
-    (existing WiFi config and other fields are preserved).
+    With --oauth, the CLI opens https://example.com/dashboard/cli-auth in
+    your browser, captures the JWT access token returned to a local loopback
+    URL, and then drives the rest of the registration / rotation flow with
+    that token -- in one go. The device_token returned by the server is
+    merged into the Pico's secrets.json alongside the existing WiFi config.
     """
     from .serial_detect import get_single_pico_port
     from .register import register_and_provision
@@ -694,6 +720,12 @@ def register(api_url, username, password, port, name, rotate, token):
             "--rotate and --token are mutually exclusive. Pick one:\n"
             "  --rotate  to ask the server for a new token\n"
             "  --token   to push a token you already have"
+        )
+    if oauth and token:
+        raise click.UsageError(
+            "--oauth and --token are mutually exclusive. --token writes a\n"
+            "device_token you already have without contacting the server,\n"
+            "while --oauth signs you in to talk to the server."
         )
 
     if token:
@@ -709,14 +741,29 @@ def register(api_url, username, password, port, name, rotate, token):
                 "--password are ignored.",
                 err=True,
             )
+    elif oauth:
+        # Browser-based sign-in: the website handles credentials, so the
+        # CLI only needs to know which server to talk to.
+        if not api_url:
+            raise click.UsageError("--api-url is required with --oauth.")
+        if username or password:
+            click.echo(
+                "Note: --oauth handles sign-in via the browser, so --username / "
+                "--password are ignored.",
+                err=True,
+            )
     else:
         # Server-touching modes need credentials. Use Click's prompt for the
         # password so it isn't echoed; api-url and username are required up
         # front so the prompt sequence is predictable.
         if not api_url:
-            raise click.UsageError("--api-url is required (unless using --token).")
+            raise click.UsageError(
+                "--api-url is required (unless using --token)."
+            )
         if not username:
-            raise click.UsageError("--username is required (unless using --token).")
+            raise click.UsageError(
+                "--username is required (unless using --token or --oauth)."
+            )
         if not password:
             password = click.prompt(
                 "Password", hide_input=True, confirmation_prompt=False
@@ -730,8 +777,18 @@ def register(api_url, username, password, port, name, rotate, token):
 
     if token:
         click.echo(f"Writing token to Pico on {port} (no server call)...")
+    elif rotate and oauth:
+        click.echo(
+            f"Rotating token for the Pico on {port} via {api_url} "
+            "(browser sign-in)..."
+        )
     elif rotate:
         click.echo(f"Rotating token for the Pico on {port} via {api_url}...")
+    elif oauth:
+        click.echo(
+            f"Registering Pico on {port} with server {api_url} "
+            "(browser sign-in)..."
+        )
     else:
         click.echo(f"Registering Pico on {port} with server {api_url}...")
 
@@ -744,6 +801,9 @@ def register(api_url, username, password, port, name, rotate, token):
             device_name=name,
             rotate=rotate,
             manual_token=token,
+            use_oauth=oauth,
+            oauth_open_browser=not no_browser,
+            oauth_timeout=oauth_timeout,
         )
         click.echo(f"\n{'=' * 60}")
         if token:
