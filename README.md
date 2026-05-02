@@ -6,7 +6,7 @@ Runs on your computer, talks to a Pi Pico W (or W 2) over USB, and your wakemypc
 
 ## Install
 
-Create a virtual environment.
+Create a virtual environment, if you want.
 ```bash
 python -m venv .venv
 ```
@@ -18,7 +18,7 @@ source .venv/bin/activate #linux/MacOS
 .\.venv\Scripts\Activate.ps1 #Powershell
 ```
 
-Use pip:
+Use pip to install:
 
 ```bash
 pip install wakemypc
@@ -68,11 +68,8 @@ wakemypc upload --github
 # 3) Configure WiFi + server.
 wakemypc provision --add-new-wifi --wifi-ssid HomeWiFi --wifi-pass mypassword
 
-# 4) Register on wakemypc.com.
-wakemypc register --username username --password mypassword 
-# or 
-# Use Token based registeration When using Goggle SignIn (Future versions will support login through browsers)
-wakemypc register --token <Token> # Check
+# 4) Register on wakemypc.com using browser login
+wakemypc register --oauth --name "My Pico"
 ```
 
 ## Auth Token registeration (Manual)

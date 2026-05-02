@@ -520,31 +520,45 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
     Examples:
 
       First-time setup (all fields required):
+
         wakemypc provision --add-new-wifi --wifi-ssid MyNetwork --wifi-pass secret123
 
       Update just the server URL (keep existing WiFi):
+
         wakemypc provision --server-url https://new-server.com
-        
-        Add a new WiFi network without removing existing ones:
+
+      Add a new WiFi network without removing existing ones:
+
         wakemypc provision --add-new-wifi --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+
         wakemypc provision -a --wifi-ssid AnotherNetwork --wifi-pass anotherpass --order 1
+
         (The --order flag is optional but can be used to control the priority of WiFi networks)
 
-        Clear all WiFi networks and set a new one:
+      Clear all WiFi networks and set a new one:
+
         wakemypc provision --clear-wifi --wifi-ssid FreshNetwork --wifi-pass freshpass
+
         wakemypc provision -c --wifi-ssid FreshNetwork --wifi-pass freshpass
 
-        Clear all WiFi networks without adding a new one:
+      Clear all WiFi networks without adding a new one:
+
         wakemypc provision --clear-wifi
+
         wakemypc provision -c
 
-        Remove a specific WiFi network:
+      Remove a specific WiFi network:
+
         wakemypc provision --remove-wifi --wifi-ssid NetworkToRemove
+
         wakemypc provision -r --wifi-ssid NetworkToRemove
 
     Notes: 
+
      - You can run this command multiple times to update the configuration as needed.
+
      - If you change the server URL, make sure to also update it on the server side if necessary.
+
      - If you change WiFi credentials, the Pico will use the new ones on next boot.
      """
     from .serial_detect import get_single_pico_port
@@ -553,8 +567,7 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
     
     # If user runs without required args → show help instead of error
     if not (
-        server_url
-        or (add_new_wifi and wifi_ssid and wifi_pass)
+        (add_new_wifi and wifi_ssid and wifi_pass)
         or clear_wifi
         or (remove_wifi and wifi_ssid)
     ):
@@ -668,7 +681,7 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
 @click.option(
     "--oauth",
     is_flag=True,
-    default=False,
+    default=True,
     help="Sign in via the website in your browser (supports username/password and 'Sign in with Google') instead of passing --username/--password, then proceed with the normal Pico registration (or rotation, with --rotate).",
 )
 @click.option(
@@ -691,20 +704,25 @@ def register(api_url, username, password, port, name, rotate, token, oauth, no_b
 
     Modes, picked by flags:
 
-      Fresh registration with username/password:
-        wakemypc register --api-url https://example.com --username admin --password pass
-
       Fresh registration via the browser (supports "Sign in with Google"):
-        wakemypc register --api-url https://example.com --oauth
+
+        wakemypc register --oauth
+
+      Fresh registration with username/password:
+
+        wakemypc register --username admin --password pass
 
       Rotate an already-registered Pico's token (server invalidates the old one):
-        wakemypc register --api-url https://example.com --username admin --password pass --rotate
-        wakemypc register --api-url https://example.com --oauth --rotate
+
+        wakemypc register --username admin --password pass --rotate
+
+        wakemypc register --oauth --rotate
 
       Push a token you already have (no server call -- e.g. you rotated via the dashboard):
+
         wakemypc register --token <device_token>
 
-    With --oauth, the CLI opens https://example.com/dashboard/cli-auth in
+    With --oauth, the CLI opens https://wakemypc.com/dashboard/cli-auth in
     your browser, captures the JWT access token returned to a local loopback
     URL, and then drives the rest of the registration / rotation flow with
     that token -- in one go. The device_token returned by the server is
@@ -746,6 +764,8 @@ def register(api_url, username, password, port, name, rotate, token, oauth, no_b
         # CLI only needs to know which server to talk to.
         if not api_url:
             raise click.UsageError("--api-url is required with --oauth.")
+        if not name:
+            raise click.UsageError("--name is required. Choose a friendly name, and pass as --name 'My Pico'")
         if username or password:
             click.echo(
                 "Note: --oauth handles sign-in via the browser, so --username / "
