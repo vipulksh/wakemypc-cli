@@ -633,8 +633,8 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
 @cli.command()
 @click.option(
     "--api-url",
-    default=None,
-    help="Base URL of your Django server (e.g. https://example.com). Required unless --token is given.",
+    default="https://wakemypc.com",
+    help="Base URL of WakeMyPC Server (e.g. https://wakemypc.com). Required unless --token is given.",
 )
 @click.option(
     "--username",

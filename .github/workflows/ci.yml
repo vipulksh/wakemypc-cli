@@ -1,0 +1,145 @@
+# CLI CI -- validation that runs on every PR (and as a safety net on push
+# to main). Anything we'd want to catch BEFORE merge lives here; the
+# release + publish workflows only do release/publish work.
+#
+# Checks:
+#   1. Required files exist (RELEASE_NOTES.md, pyproject.toml, src/...).
+#   2. pyproject.toml parses (TOML).
+#   3. RELEASE_NOTES.md first heading is "## vX.Y.Z - ...", parseable.
+#   4. RELEASE_NOTES.md version matches pyproject.toml `project.version`.
+#      (release.yml asserts the same thing, but doing it here means a
+#      mismatched PR fails before merge -- not after, when someone has
+#      to revert.)
+#   5. Every src/wakemypc/*.py compiles (python syntax check).
+#   6. Package builds cleanly (`python -m build`).
+#   7. The built wheel installs and `wakemypc --help` runs (smoke test
+#      that the click entry point actually works after packaging).
+
+name: CLI CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# CI runs are read-only; keep the token scoped accordingly.
+permissions:
+  contents: read
+
+# A new push to a PR cancels the previous CI run for that PR. Push events
+# to main don't cancel each other (different group key).
+concurrency:
+  group: cli-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Required files exist
+        run: |
+          set -euo pipefail
+          for f in RELEASE_NOTES.md pyproject.toml src/wakemypc/__init__.py src/wakemypc/main.py; do
+            if [ ! -e "$f" ]; then
+              echo "::error file=$f::missing required file"
+              exit 1
+            fi
+          done
+
+      - name: Parse pyproject.toml version
+        id: pyproject_version
+        run: |
+          set -euo pipefail
+          version=$(python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "pyproject.toml says: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Parse release-notes version
+        id: notes_version
+        # Same first-line shape that release.yml expects:
+        #   ## vX.Y.Z - <summary>     OR     ## vX.Y.Z — <summary>
+        # The version is the first capture group; we drop the leading "v".
+        run: |
+          set -euo pipefail
+          first_line=$(head -n 1 RELEASE_NOTES.md | tr -d '\r')
+          echo "First line: $first_line"
+          if [[ "$first_line" =~ ^##[[:space:]]+v([0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?) ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "::error file=RELEASE_NOTES.md::first line must look like '## vX.Y.Z ...'"
+            exit 1
+          fi
+          echo "RELEASE_NOTES.md says: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Versions agree
+        # release.yml hard-fails on this anyway, but doing it in CI means
+        # the PR shows a red check instead of a successful merge that
+        # then fails the release workflow on main.
+        run: |
+          set -euo pipefail
+          notes="${{ steps.notes_version.outputs.version }}"
+          pkg="${{ steps.pyproject_version.outputs.version }}"
+          if [ "$notes" != "$pkg" ]; then
+            echo "::error::RELEASE_NOTES.md (v$notes) does not match pyproject.toml (v$pkg). Bump one of them so they agree."
+            exit 1
+          fi
+          echo "Both report v$notes -- OK."
+
+      - name: Python syntax-compile every src/wakemypc/*.py
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in src/wakemypc/*.py; do
+            [ -f "$f" ] || continue
+            if ! python -m py_compile "$f"; then
+              echo "::error file=$f::syntax error"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: Build wheel + sdist
+        # Same command release.yml runs. If `python -m build` fails here,
+        # release.yml would fail on main too -- catching it pre-merge is
+        # the whole point of having a CI workflow.
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -lh dist/
+
+      - name: Install built wheel and smoke-test entry point
+        # Catches packaging mistakes that compile but produce a broken
+        # wheel: missing `[project.scripts]`, mis-spelled module path,
+        # forgotten dependency, etc. `wakemypc --help` will exit non-zero
+        # if click can't load the cli group, so this is a tight check.
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/*.whl | head -n 1)
+          if [ -z "$wheel" ]; then
+            echo "::error::no wheel produced in dist/"
+            exit 1
+          fi
+          python -m pip install --quiet "$wheel"
+          wakemypc --version
+          wakemypc --help > /dev/null
+          # The register command is the one that grew most recently
+          # (--oauth flow); make sure click can introspect it cleanly.
+          wakemypc register --help > /dev/null
+          echo "Smoke test passed."
