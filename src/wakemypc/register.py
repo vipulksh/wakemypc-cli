@@ -63,7 +63,7 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
     HOW IT WORKS  (loopback authorization-code exchange, modelled on RFC 8252)
     --------------------------------------------------------------------------
       1. We bind a one-shot HTTP server on http://127.0.0.1:<random-free-port>.
-      2. We open the user's browser at <api_url>/dashboard/cli-auth?... passing
+      2. We open the user's browser at <api_url>/cli-auth?... passing
          our loopback URL as redirect_uri and a fresh CSRF state token.
       3. The browser-side React page (frontend/src/pages/CliAuth.jsx) handles
          the actual sign-in flow (username/password OR "Sign in with Google"),
@@ -149,7 +149,7 @@ def oauth_login_via_browser(api_url, timeout=300, open_browser=True):
     redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     auth_url = (
-        f"{api_url}/dashboard/cli-auth?"
+        f"{api_url}/cli-auth?"
         f"redirect_uri={urllib.parse.quote(redirect_uri, safe='')}"
         f"&state={urllib.parse.quote(state, safe='')}"
     )
@@ -500,7 +500,7 @@ def register_and_provision(
     together the entire registration process:
 
       1. Authenticate with the server. Either:
-           - use_oauth=True   -> open the website's /dashboard/cli-auth page
+           - use_oauth=True   -> open the website's /cli-auth page
                                   in a browser, capture the JWT via a local
                                   loopback callback (supports password OR
                                   "Sign in with Google").

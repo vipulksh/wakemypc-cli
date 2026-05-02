@@ -1,7 +1,7 @@
 [project]
 name = "wakemypc"
 version = "1.2.1"
-description = "Companion CLI for wakemypc.com -- flash, provision, and manage Pico W transmitters from your terminal"
+description = "Companion CLI for https://wakemypc.com (WakeMyPC) -- flash, provision, and manage Pico W transmitters from your terminal. WakeMyPC is a website that lets you turn on you PC remotely from anywhere in the world using Wake-on-Lan."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
