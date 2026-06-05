@@ -495,7 +495,6 @@ def upload(port, firmware_dir, github, version, no_restart, files):
 @click.option(
     "--server-url",
     required=False,
-    default="https://wakemypc.com",
     help="URL of your WakeMyPC server (e.g. https://wakemypc.com)",
 )
 @click.option("-a", "--add-new-wifi", required=False, is_flag=True, help="Add new WiFi network instead of replacing existing ones")
@@ -570,6 +569,7 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
         (add_new_wifi and wifi_ssid and wifi_pass)
         or clear_wifi
         or (remove_wifi and wifi_ssid)
+        or server_url
     ):
         click.echo("\nMissing required options.\n")
         click.echo(click.get_current_context().get_help())
@@ -598,6 +598,9 @@ def provision(server_url, wifi_ssid, wifi_pass, port, add_new_wifi, clear_wifi, 
         sys.exit(1)
 
     click.echo(f"Provisioning Pico on {port}...")
+    
+    if server_url == "":
+        server_url = "https://wakemypc.com"  # default value if user explicitly passed empty string
 
     try:
         result = provision_pico(

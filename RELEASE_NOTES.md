@@ -1,5 +1,3 @@
-## v1.2.3 — Patch CLI
+## v1.2.4 — Patch CLI `provision` option
 
-- Fix how CLI shows help texts for various options(Formatting)
-- Add error for not passing `--name` in `register --oauth`, because API requires it.
-- Bump `pyproject.toml` to 5 - Production/Stable State
+- Fix `wakemypc provision --server-url ***` displayed missing parameters error when using this option
