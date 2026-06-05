@@ -135,4 +135,5 @@ jobs:
           tag_name: ${{ steps.gate.outputs.tag }}
           name: ${{ steps.gate.outputs.tag }}
           body_path: RELEASE_NOTES.md
+          generate_release_notes: true
           files: dist/*
