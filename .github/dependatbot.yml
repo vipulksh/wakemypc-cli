@@ -1,0 +1,18 @@
+# Config for Dependabot updates. See Documentation here:
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Enable version updates for Python (uv).
+  # This project is uv-managed: deps live in pyproject.toml + uv.lock . 
+  # We want to update minor and patch versions, but not major versions, to avoid breaking changes.
+  - package-ecosystem: 'uv'
+    directory: '/'
+    # Every weekday
+    schedule:
+      interval: 'daily'
+    groups:
+      python:
+        update-types:
+          - 'minor'
+          - 'patch'
